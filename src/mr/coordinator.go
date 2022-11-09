@@ -1,15 +1,85 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"sync"
+	"time"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
-
 type Coordinator struct {
 	// Your definitions here.
+	Files      []string
+	nReduce    int32
+	MapData    []string
+	Mapped     bool
+	Reduced    bool
+	ReduceData []string
+	WorkStatus map[int32]WorkerStatus
+	reduceSize int
+	sync.Mutex
+}
 
+type WorkerStatusType int32
+
+const (
+	WorkerStatusTypeRunning WorkerStatusType = iota
+	WorkerStatusTypeReady
+	WorkerStatusDead
+)
+
+type WorkerStatus struct {
+	Resp
+	WorkerStatusType
+	lastCallTime time.Time
+}
+
+func min(a, b int) int {
+	if a > b {
+		return b
+	}
+	return a
+}
+
+func (c *Coordinator) mapTask(args *Req, reply *Resp) error {
+	c.Lock()
+	defer c.Unlock()
+	c.ReduceData = append(c.ReduceData, args.ReduceData)
+	if len(c.ReduceData) != 0 {
+		reply.ReduceData = c.ReduceData[:min(c.reduceSize, len(c.ReduceData))]
+		reply.Type = TaskTypeReduce
+	}
+	return nil
+}
+
+func (c *Coordinator) reduceTask(args *Req, reply *Resp) error {
+	c.Lock()
+	defer c.Unlock()
+	c.MapData = append(c.MapData, args.MapData...)
+	if len(c.Files) != 0 {
+		reply.MapData = c.Files[0]
+		c.Files = append(c.Files[:0], c.Files[1:]...)
+		reply.Type = TaskTypeReduce
+		c.WorkStatus[args.WorkerId] = WorkerStatus{
+			Resp:             *reply,
+			WorkerStatusType: WorkerStatusTypeRunning,
+			lastCallTime:     time.Now(),
+		}
+	} else {
+		reply.Type = TaskTypeNULL
+	}
+	return nil
+}
+
+func (c *Coordinator) Task(args *Req, reply *Resp) error {
+	switch {
+
+	}
+
+	return nil
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -24,6 +94,13 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+func (c *Coordinator) Map(args *Args, reply *Reply) error {
+	return nil
+}
+
+func (c *Coordinator) Reduce(args *Args, reply *Reply) error {
+	return nil
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -50,7 +127,6 @@ func (c *Coordinator) Done() bool {
 
 	// Your code here.
 
-
 	return ret
 }
 
@@ -63,7 +139,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-
 
 	c.server()
 	return &c
