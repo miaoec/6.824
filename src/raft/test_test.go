@@ -31,7 +31,7 @@ func TestInitialElection2A(t *testing.T) {
 
 	// sleep a bit to avoid racing with followers learning of the
 	// election, then check that all peers agree on the term.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	term1 := cfg.checkTerms()
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
@@ -61,6 +61,9 @@ func TestReElection2A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+	println(leader1)
+
+	time.Sleep(time.Second * 5)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
@@ -286,7 +289,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-
+	t.Logf("disconnect:%v", (leader+1)%servers)
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
@@ -297,6 +300,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+	t.Logf("reconnect:%v", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -472,7 +476,7 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-
+	t.Logf("disconnect leader1(%v) ", leader1)
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -484,15 +488,15 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-
+	t.Logf("disconnect leader2(%v) ", leader2)
 	// old leader connected again
 	cfg.connect(leader1)
-
+	t.Logf("reconnect leader1(%v) ", leader1)
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-
+	t.Logf("reconnect leader2(%v) ", leader2)
 	cfg.one(105, servers, true)
 
 	cfg.end()
