@@ -1,10 +1,12 @@
 package mr
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,12 +26,42 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(
+	mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string,
+) {
+	log.SetFlags(log.Lshortfile | log.Llongfile)
+	taskType := TaskTypeNULL
+	req := &Req{Type: taskType, Offset: -1}
+	resp := &Resp{}
+	if ok := call("Coordinator.Task", req, resp); !ok {
+		time.Sleep(time.Millisecond * 10)
+	}
+	for {
+		log.Println(resp.Type, resp.Offset)
+		req.Type = resp.Type
+		req.Offset = resp.Offset
+		switch resp.Type {
+		case TaskTypeMap:
+			result := mapf(resp.MapData.Value, resp.MapData.Value)
+			req.MappedData = result
+			//req.ReducedData =
+		case TaskTypeReduce:
+			result := reducef(resp.ReduceData.Key, resp.ReduceData.Value)
+			req.ReducedData = KeyValue{Key: resp.ReduceData.Key, Value: result}
+			req.MappedData = nil
+			//fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		}
+		//log.Print(req)
+		//log.Print(resp)
+		if ok := call("Coordinator.Task", req, resp); !ok {
+			log.Printf("return %+v error", req.Type)
+		}
+
+	}
 
 	// Your worker implementation here.
 
@@ -73,9 +105,9 @@ func CallExample() {
 // returns false if something goes wrong.
 //
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	//sockname := coordinatorSock()
+	//c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
@@ -86,6 +118,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	log.Println(err)
 	return false
 }
