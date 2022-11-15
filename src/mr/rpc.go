@@ -6,29 +6,37 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+	"time"
+)
 import "strconv"
 
 type TaskType int
 
 const (
-	TaskTypeMap TaskType = iota
+	TaskTypeNULL TaskType = iota
+	TaskTypeMap
 	TaskTypeReduce
-	TaskTypeNULL
+	TaskShutdown
 )
 
+type Task struct {
+	Type        TaskType         // "Map", "Reduce", "Wait"
+	Status      WorkerStatusType // "Unassigned", "Assigned", "Finished"
+	Index       int              // Index of the task
+	Timestamp   time.Time        // Start time
+	MapFile     string           // File for map task
+	ReduceFiles []string         // List of files for reduce task
+}
+
 type Req struct {
-	Type        TaskType
-	MappedData  []KeyValue
-	Offset      int
-	ReducedData KeyValue
+	Task Task
 }
 
 type Resp struct {
-	Type       TaskType
-	Offset     int
-	MapData    KeyValue
-	ReduceData ReduceData
+	Task    Task
+	NReduce int
 }
 
 //
