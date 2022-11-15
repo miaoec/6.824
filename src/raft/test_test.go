@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -817,6 +820,7 @@ func TestPersist32C(t *testing.T) {
 // haven't been committed yet.
 //
 func TestFigure82C(t *testing.T) {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -1184,8 +1188,10 @@ func TestSnapshotInstall2D(t *testing.T) {
 }
 
 func TestSnapshotInstallUnreliable2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
-		true, false, false)
+	snapcommon(
+		t, "Test (2D): install snapshots (disconnect+unreliable)",
+		true, false, false,
+	)
 }
 
 func TestSnapshotInstallCrash2D(t *testing.T) {

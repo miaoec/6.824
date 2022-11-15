@@ -18,6 +18,9 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
+	"log"
 	"math/rand"
 	"runtime"
 	"sort"
@@ -125,7 +128,7 @@ func (rf *Raft) startElection() {
 	startTerm := rf.term
 	rf.voteFor = rf.me
 	voteCount := 1
-
+	rf.persist()
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -179,13 +182,10 @@ func (rf *Raft) sendHeartBeat() {
 		}
 
 		go func() {
+			rf.matchIndex[rf.me] = len(rf.logs) - 1
 			for i, _ := range rf.peers {
 				rf.mu.Lock()
 				if i == rf.me {
-					rf.matchIndex[i] = len(rf.logs) - 1
-					idx := rf.getMajorityMatchIndex()
-					rf.commitIndex = idx
-					rf.mu.Unlock()
 					continue
 				}
 				var entries []LogEntry
@@ -219,8 +219,7 @@ func (rf *Raft) sendHeartBeat() {
 					if reply.Success {
 						rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
 						rf.nextIndex[server] = rf.matchIndex[server] + 1
-						idx := rf.getMajorityMatchIndex()
-						rf.commitIndex = idx
+						rf.updateCommitIndex()
 					} else {
 						if rf.nextIndex[server] > 1 {
 							rf.nextIndex[server]--
@@ -230,6 +229,14 @@ func (rf *Raft) sendHeartBeat() {
 			}
 		}()
 		rf.mu.Unlock()
+	}
+}
+
+//leader 不能够主动提交之前任期的日志
+func (rf *Raft) updateCommitIndex() {
+	idx := rf.getMajorityMatchIndex()
+	if idx >= 0 && rf.logs[idx].Term == rf.term {
+		rf.commitIndex = idx
 	}
 }
 
@@ -259,34 +266,41 @@ func (rf *Raft) getMajorityMatchIndex() int {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.logs) != nil || e.Encode(rf.voteFor) != nil || e.Encode(rf.term) != nil {
+		log.Fatal("encode Error")
+	}
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
+	rf.log("readPersist")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	term := 0
+	voteFor := 0
+	logs := []LogEntry{}
+	if err := d.Decode(&logs); err != nil {
+		log.Fatalf("readPersist Error,%+v", err)
+	}
+	if err := d.Decode(&voteFor); err != nil {
+		log.Fatalf("readPersist Error,%+v", err)
+	}
+	if err := d.Decode(&term); err != nil {
+		log.Fatalf("readPersist Error,%+v", err)
+	}
+	rf.term = term
+	rf.voteFor = voteFor
+	rf.logs = logs
+	rf.log("readPersist %+v", rf.logs)
 }
 
 //
@@ -337,6 +351,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) becomeFollower(term int) {
 	_, _, l, _ := runtime.Caller(1)
+	defer rf.persist()
 	rf.log("%v,becomeFollower:%v", l, term)
 	rf.state = Follower
 	rf.term = term
@@ -349,7 +364,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	defer rf.persist()
 	reply.Term = rf.term
 	reply.Grant = false
 	if rf.term < args.Term {
@@ -398,6 +413,7 @@ const AppendEntriesPreLogTConflict = "preLog term conflict "
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	reply.Term = rf.term
 	rf.electionTime.Reset(rf.newRandTimeOut())
 	defer rf.log("heartBeatRecv req:%+v,rsp:%+v", args, reply)
@@ -413,14 +429,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	reply.Success = true
-	//j := 0
-	//b := *args
-	//c := make([]LogEntry, len(rf.logs))
-	//copy(c, rf.logs)
-	//for i := b.PreLogIndex + 1; i < len(rf.logs) && j < len(args.Entries); i++ {
-	//	rf.logs[i] = args.Entries[j]
-	//	j++
-	//}
 	rf.logs = rf.logs[:args.PreLogIndex+1]
 	rf.logs = append(rf.logs, args.Entries...)
 
@@ -499,12 +507,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.state == Leader
 	if rf.state == Leader {
 		rf.logs = append(rf.logs, LogEntry{Cmd: command, Term: rf.term})
-		index = len(rf.logs)
 		term = rf.term
+		rf.persist()
+
+		index = len(rf.logs)
 	}
-
-	// Your code here (2B).
-
 	return index, term, isLeader
 }
 
@@ -536,18 +543,11 @@ func (rf *Raft) log(str string, args ...interface{}) {
 }
 
 func (rf *Raft) newRandTimeOut() time.Duration {
-	return time.Duration(rand.Int()%150+150) * time.Millisecond
+	return time.Duration(rand.Int()%150+1000) * time.Millisecond
 }
 func (rf *Raft) ticker() {
 
 	for {
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-		//if startTerm != rf.term {
-		//	rf.mu.Unlock()
-		//	continue
-		//}
 		select {
 		case <-rf.electionTime.C:
 			rf.mu.Lock()
@@ -575,11 +575,13 @@ func (rf *Raft) applyLoop() {
 					Command:      rf.logs[i].Cmd,
 					CommandIndex: i + 1,
 				}
-				rf.log("apply log%+v", ApplyMsg{
-					CommandValid: true,
-					Command:      rf.logs[i].Cmd,
-					CommandIndex: i + 1,
-				})
+				rf.log(
+					"apply log%+v", ApplyMsg{
+						CommandValid: true,
+						Command:      rf.logs[i].Cmd,
+						CommandIndex: i + 1,
+					},
+				)
 			}
 		}
 
@@ -599,8 +601,10 @@ func (rf *Raft) applyLoop() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+func Make(
+	peers []*labrpc.ClientEnd, me int,
+	persister *Persister, applyCh chan ApplyMsg,
+) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
