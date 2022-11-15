@@ -7,6 +7,8 @@ package mr
 //
 
 import (
+	"encoding/json"
+	"log"
 	"os"
 	"time"
 )
@@ -62,4 +64,12 @@ func coordinatorSock() string {
 	s := "/var/tmp/824-mr-"
 	s += strconv.Itoa(os.Getuid())
 	return s
+}
+
+func jsonString(o interface{}) string {
+	by, err := json.Marshal(o)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return string(by)
 }

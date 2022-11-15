@@ -56,9 +56,6 @@ func Worker(
 		time.Sleep(time.Millisecond * 10)
 	}
 	for {
-		//log.Println(resp.Type, resp.Offset)
-		//req.Type = resp.Type
-		//req.Offset = resp.Offset
 		req.Task = resp.Task
 		switch resp.Task.Type {
 		case TaskTypeNULL:
@@ -74,25 +71,14 @@ func Worker(
 			DoReduce(resp.NReduce, &resp.Task, reducef)
 			req.Task = resp.Task
 			req.Task.Status = WorkerStatusDone
-			//result := reducef(resp.ReduceData.Key, resp.ReduceData.Value)
-			//req.ReducedData = KeyValue{Key: resp.ReduceData.Key, Value: result}
-			//req.MappedData = nil
-			//fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 		}
-		by, _ := json.Marshal(*req)
-		logf("req:%s", string(by))
+		logf("req:%s", jsonString(*req))
 		resp = &Resp{}
 		if ok := call("Coordinator.Task", req, resp); !ok {
 			log.Printf("return %+v error", req.Task)
 		}
-		by, _ = json.Marshal(*resp)
-		logf("resp:%s", string(by))
+		logf("resp:%s", jsonString(*resp))
 	}
-
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
 
 }
 func DoReduce(nReduce int, task *Task, reducef func(string, []string) string) {
@@ -126,7 +112,6 @@ func DoReduce(nReduce int, task *Task, reducef func(string, []string) string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		//fmt.Printf(fileName)
 	}
 }
 func DoMap(nReduce int, task *Task, mapf func(string, string) []KeyValue) {
@@ -155,7 +140,6 @@ func DoMap(nReduce int, task *Task, mapf func(string, string) []KeyValue) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		//log.Println(rFileName)
 	}
 	task.ReduceFiles = []string{}
 	for s, _ := range fileIN {

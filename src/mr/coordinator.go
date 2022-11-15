@@ -2,7 +2,6 @@ package mr
 
 import "C"
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,31 +15,15 @@ import "net"
 import "net/rpc"
 import "net/http"
 
-//type TaskStatus int
-//
-//const (
-//	//TaskStatus Ready
-//	TaskStatusDone = iota
-//	TaskStatusRunning
-//	TaskStatusReady
-//)
-//
-//type Task struct {
-//	File   string
-//	Offset int
-//	Status TaskStatus
-//}
-
 type ReduceData struct {
 	Key   string
 	Value []string
 }
 
 type Coordinator struct {
-	LogFile io.Writer
-	Files   []KeyValue
-	nReduce int
-	//MappedData    []KeyValue
+	LogFile    io.Writer
+	Files      []KeyValue
+	nReduce    int
 	Mapped     bool
 	Reduced    bool
 	MapTask    []Task
@@ -79,7 +62,7 @@ func (c *Coordinator) checkoutTimeout() {
 				if task.Status == WorkerStatusTypeRunning {
 					if time.Since(task.Timestamp) > 10*time.Second {
 						c.MapTask[i].Status = WorkerStatusWaiting
-						c.log("mapTask %+v is timeout in %s ", task, time.Now().String())
+						c.log("mapTask %+v is timeout in %s ", jsonString(task), time.Now().String())
 					}
 				}
 			}
@@ -88,7 +71,7 @@ func (c *Coordinator) checkoutTimeout() {
 				if task.Status == WorkerStatusTypeRunning {
 					if time.Since(task.Timestamp) > 10*time.Second {
 						c.ReduceTask[i].Status = WorkerStatusWaiting
-						c.log("reduceTask %+v is timeout in %s ", task, time.Now().String())
+						c.log("reduceTask %+v is timeout in %s ", jsonString(task), time.Now().String())
 					}
 				}
 			}
@@ -107,21 +90,6 @@ func (c *Coordinator) reduceTask(reply *Resp) {
 			return
 		}
 	}
-	//if len(c.MappedData) != 0 {
-	//	key, value := c.popData(c.reduceSize)
-	//	reply.ReduceData = ReduceData{Key: key, Value: value}
-	//	reply.Type = TaskTypeReduce
-	//	reply.Offset = len(c.WorkStatus)
-	//	c.WorkStatus = append(
-	//		c.WorkStatus, &WorkerStatus{
-	//			Resp:         *reply,
-	//			Status:       WorkerStatusTypeRunning,
-	//			lastCallTime: time.Now(),
-	//		},
-	//	)
-	//} else {
-	//	reply.Type = TaskTypeNULL
-	//}
 	return
 }
 
@@ -135,21 +103,6 @@ func (c *Coordinator) mapTask(reply *Resp) {
 			return
 		}
 	}
-	//if len(c.Files) > 0 {
-	//	reply.MapData = c.Files[0]
-	//	c.Files = c.Files[1:]
-	//	reply.Type = TaskTypeMap
-	//	reply.Offset = len(c.WorkStatus)
-	//	c.WorkStatus = append(
-	//		c.WorkStatus, &WorkerStatus{
-	//			Resp:         *reply,
-	//			Status:       WorkerStatusTypeRunning,
-	//			lastCallTime: time.Now(),
-	//		},
-	//	)
-	//} else {
-	//	reply.Type = TaskTypeNULL
-	//}
 }
 
 func (c *Coordinator) toReduce() {
@@ -173,9 +126,8 @@ func (c *Coordinator) toReduce() {
 		}
 	}
 
-	c.log("finished map,the reduece file is:")
-	by, _ := json.Marshal(c.ReduceTask)
-	c.log(string(by))
+	c.log("finished map,the reduce file is:")
+	c.log(jsonString(c.ReduceTask))
 }
 
 func (c *Coordinator) checkMapped() bool {
@@ -202,46 +154,11 @@ func (c *Coordinator) checkReduced() bool {
 	return c.Mapped
 }
 
-//	if !c.Mapped {
-//		return false
-//	}
-//	if !c.Reduced {
-//		hasRunning := false
-//		for offset, status := range c.WorkStatus {
-//			if status.Status == WorkerStatusTypeRunning {
-//				hasRunning = true
-//				if time.Since(status.lastCallTime) > time.Second*5 {
-//					log.Printf("WorkerStatusWaiting offset=%+v", offset)
-//					switch status.Type {
-//					case TaskTypeMap:
-//						c.Files = append(c.Files, status.MapData)
-//					case TaskTypeReduce:
-//						c.pushData(status.ReduceData.Key, status.ReduceData.Value...)
-//					}
-//					c.WorkStatus[offset].Status = WorkerStatusWaiting
-//				}
-//			}
-//		}
-//		if hasRunning {
-//			return false
-//		}
-//		for _, s := range c.MappedData {
-//			if len(s) > 1 {
-//				return false
-//			}
-//		}
-//		c.Reduced = true
-//
-//	}
-//	return c.Reduced
-//}
-
 func (c *Coordinator) Task(args *Req, reply *Resp) error {
 	c.Lock()
 	defer c.Unlock()
-	by, _ := json.Marshal(*args)
-	c.log("rececv:%s", string(by))
-	if args.Task.Index != -1 { //&& c.[args.Task.Index].Status != WorkerStatusWaiting
+	c.log("receive:%s", jsonString(*args))
+	if args.Task.Index != -1 {
 		switch args.Task.Type {
 		case TaskTypeReduce:
 			if c.ReduceTask[args.Task.Index].Status == WorkerStatusTypeRunning {
@@ -257,8 +174,6 @@ func (c *Coordinator) Task(args *Req, reply *Resp) error {
 				}
 				c.MapTask[args.Task.Index] = args.Task
 			}
-
-			//c.MapTask[args.]
 		}
 	}
 	reply.NReduce = c.nReduce
@@ -273,8 +188,7 @@ func (c *Coordinator) Task(args *Req, reply *Resp) error {
 		}()
 		reply.Task.Type = TaskShutdown
 	}
-	by, _ = json.Marshal(reply)
-	c.log("reply:%s", string(by))
+	c.log("reply:%s", jsonString(*reply))
 	return nil
 }
 
