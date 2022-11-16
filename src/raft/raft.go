@@ -20,6 +20,7 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"fmt"
 	"log"
 	"math/rand"
 	"runtime"
@@ -142,25 +143,22 @@ func (rf *Raft) startElection() {
 		reply := &RequestVoteReply{}
 		go func(server int) {
 			rf.sendRequestVote(server, args, reply)
-			if reply.Grant {
-				rf.mu.Lock()
-
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if rf.term == startTerm && reply.Grant { //避免之前的投票导致重新当回leader
 				voteCount++
-				if voteCount*2 >= len(rf.peers)+1 {
-					rf.log("to leader")
-					rf.becomeLeader()
-					rf.mu.Unlock()
-					return
+				if rf.state == Candidate {
+					if voteCount*2 >= len(rf.peers)+1 {
+						rf.becomeLeader()
+						return
+					}
 				}
-				if reply.Term > rf.term {
-					rf.voteFor = -1
-					rf.log("to Follower")
-					rf.becomeLeader()
-					rf.mu.Unlock()
-					return
-				}
-				rf.mu.Unlock()
-
+			}
+			if reply.Term > startTerm {
+				rf.voteFor = -1
+				rf.log("to Follower")
+				rf.becomeFollower(reply.Term)
+				return
 			}
 		}(i)
 	}
@@ -180,12 +178,13 @@ func (rf *Raft) sendHeartBeat() {
 			rf.mu.Unlock()
 			continue
 		}
-
+		rf.matchIndex[rf.me] = len(rf.logs) - 1
 		go func() {
-			rf.matchIndex[rf.me] = len(rf.logs) - 1
 			for i, _ := range rf.peers {
 				rf.mu.Lock()
 				if i == rf.me {
+					rf.updateCommitIndex()
+					rf.mu.Unlock()
 					continue
 				}
 				var entries []LogEntry
@@ -272,6 +271,7 @@ func (rf *Raft) persist() {
 		log.Fatal("encode Error")
 	}
 	data := w.Bytes()
+	//rf.log("")
 	rf.persister.SaveRaftState(data)
 }
 
@@ -371,15 +371,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term)
 	}
 	//mark: 这里比较candidate的日志算法比较新的逻辑是关键，先比较最后一条日志的任期，任期大的日志新，如果任期相同比较index，index长的日志新
+	if rf.voteFor != -1 {
+		reply.Msg = RequestVoteMsgAlreadyVoteFor + strconv.Itoa(rf.term)
+		return
+	}
 	if rf.term <= args.Term && rf.voteFor == -1 &&
 		(rf.lastLog().Term < args.LastLogTerm ||
 			rf.lastLog().Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex+1) {
 		reply.Term = rf.term
 		reply.Grant = true
+		rf.voteFor = args.Id
 		rf.electionTime.Reset(rf.newRandTimeOut())
-	}
-	if rf.voteFor != -1 {
-		reply.Msg = RequestVoteMsgAlreadyVoteFor + strconv.Itoa(rf.term)
 	}
 
 	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", *args, *reply, rf.voteFor)
@@ -506,11 +508,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	isLeader = rf.state == Leader
 	if rf.state == Leader {
+		rf.log("append:%+v", LogEntry{Cmd: command, Term: rf.term})
 		rf.logs = append(rf.logs, LogEntry{Cmd: command, Term: rf.term})
 		term = rf.term
 		rf.persist()
-
 		index = len(rf.logs)
+
 	}
 	return index, term, isLeader
 }
@@ -527,6 +530,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
+	rf.log("crash,save logs%+v", rf.logs)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 }
@@ -539,11 +543,20 @@ func (rf *Raft) killed() bool {
 // The  go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) log(str string, args ...interface{}) {
-	//fmt.Printf(fmt.Sprintf("raft(id:%v,term:%v,state:%v)##: %v\n", rf.me, rf.term, rf.state, str), args...)
+	fmt.Printf(
+		"%s,%+v\n", fmt.Sprintf(
+			fmt.Sprintf(
+				"raft(id:%v,term:%v,state:%v)##: %v", rf.me, rf.term, rf.state,
+				str,
+			),
+			args...,
+		), rf.logs,
+	)
+
 }
 
 func (rf *Raft) newRandTimeOut() time.Duration {
-	return time.Duration(rand.Int()%150+1000) * time.Millisecond
+	return time.Duration(rand.Int()%150+100) * time.Millisecond
 }
 func (rf *Raft) ticker() {
 
