@@ -20,13 +20,17 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"context"
 	"fmt"
+	"github.com/opentracing/opentracing-go"
+	otlog "github.com/opentracing/opentracing-go/log"
+	"github.com/yurishkuro/opentracing-tutorial/go/lib/tracing"
 	"log"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
-
 	//"crypto/rand"
 	//	"bytes"
 	"sync"
@@ -60,8 +64,22 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+type State int
+
+func (s State) String() string {
+	switch s {
+	case Leader:
+		return "Leader"
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	}
+	return "Unk"
+}
+
 const (
-	Follower = iota
+	Follower State = iota
 	Candidate
 	Leader
 )
@@ -79,7 +97,7 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state        int
+	state        State
 	term         int
 	voteFor      int
 	electionTime *time.Ticker
@@ -92,6 +110,19 @@ type Raft struct {
 	matchIndex []int
 
 	applyChan chan ApplyMsg
+
+	tracer     opentracing.Tracer
+	tracerName string
+	mainSpan   opentracing.Span
+}
+
+func (rf *Raft) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"state":   rf.state,
+		"term":    rf.term,
+		"logs":    rf.logs,
+		"voteFor": rf.voteFor,
+	}
 }
 
 type LogEntry struct {
@@ -116,6 +147,8 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) becomeLeader() {
 	_, _, l, _ := runtime.Caller(1)
 	rf.log("%v,becomeLeader", l)
+	span := rf.newSpan(context.Background(), "becomeLeader")
+	defer span.Finish()
 	rf.state = Leader
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = len(rf.logs)
@@ -123,13 +156,17 @@ func (rf *Raft) becomeLeader() {
 	}
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) startElection(ctx context.Context) {
+
 	rf.term++
 	rf.state = Candidate
 	startTerm := rf.term
 	rf.voteFor = rf.me
 	voteCount := 1
+
 	rf.persist()
+	pSpan := rf.newSpan(ctx, "sendRequestVote")
+	defer pSpan.Finish()
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -141,10 +178,25 @@ func (rf *Raft) startElection() {
 			LastLogIndex: len(rf.logs) - 1,
 		}
 		reply := &RequestVoteReply{}
+
 		go func(server int) {
+			span := rf.newSpan(
+				context.Background(), "send voteReq to "+strconv.Itoa(server), opentracing.ChildOf(pSpan.Context()),
+			)
+			defer span.Finish()
+			span.LogFields(otlog.Object("args", args.LogData()))
+			spanCtx := new(bytes.Buffer)
+			err := span.Tracer().Inject(span.Context(), opentracing.Binary, spanCtx)
+			if err != nil {
+				log.Fatal(err)
+			}
+			args.Context = spanCtx.Bytes()
+
 			rf.sendRequestVote(server, args, reply)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
+
+			span.LogFields(otlog.Object("reply", *reply))
 			if rf.term == startTerm && reply.Grant { //避免之前的投票导致重新当回leader
 				voteCount++
 				if rf.state == Candidate {
@@ -167,6 +219,8 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) sendHeartBeat() {
+	//oldState := Candidate
+	//var fspan opentracing.Span
 	for {
 		time.Sleep(time.Duration(50) * time.Millisecond)
 		rf.mu.Lock()
@@ -178,14 +232,24 @@ func (rf *Raft) sendHeartBeat() {
 			rf.mu.Unlock()
 			continue
 		}
-		rf.matchIndex[rf.me] = len(rf.logs) - 1
+
+		//opentracing
+		//	不能够协程去调用，可能会导致出现Follower发心跳
 		go func() {
+			fspan := rf.newSpan(context.Background(), "sendHeartBeat")
+			rf.matchIndex[rf.me] = len(rf.logs) - 1
 			for i, _ := range rf.peers {
 				rf.mu.Lock()
 				if i == rf.me {
 					rf.updateCommitIndex()
 					rf.mu.Unlock()
 					continue
+				}
+				span := rf.tracer.StartSpan("send to "+strconv.Itoa(i), opentracing.ChildOf(fspan.Context()))
+				spanCtx := new(bytes.Buffer)
+				err := span.Tracer().Inject(span.Context(), opentracing.Binary, spanCtx)
+				if err != nil {
+					log.Fatal(err)
 				}
 				var entries []LogEntry
 				preLog := LogEntry{Term: -1}
@@ -204,13 +268,28 @@ func (rf *Raft) sendHeartBeat() {
 					PreLogIndex: rf.nextIndex[i] - 1,
 					PreLogTerm:  preLog.Term,
 					Entries:     entries,
+					Context:     spanCtx.Bytes(),
 				}
 				reply := &AppendEntriesReply{}
 				rf.mu.Unlock()
 				go func(server int) {
+					span.LogFields(
+						otlog.String("to", strconv.Itoa(server)),
+						otlog.Object("args", args.LogData()),
+						otlog.Object("data", rf.ToMap()),
+					)
 					rf.sendAppendEntries(server, args, reply)
 					rf.mu.Lock()
+
+					span.LogFields(
+						otlog.Object("reply", reply),
+					)
+					defer span.Finish()
 					defer rf.mu.Unlock()
+					//要判断leader
+					if rf.state != Leader {
+						return
+					}
 					if reply.Term > rf.term {
 						rf.becomeFollower(reply.Term)
 						return
@@ -220,13 +299,15 @@ func (rf *Raft) sendHeartBeat() {
 						rf.nextIndex[server] = rf.matchIndex[server] + 1
 						rf.updateCommitIndex()
 					} else {
-						if rf.nextIndex[server] > 1 {
+						if rf.nextIndex[server] >= 1 {
 							rf.nextIndex[server]--
 						}
 					}
 				}(i)
 			}
+			fspan.Finish()
 		}()
+		//fspan.Finish()
 		rf.mu.Unlock()
 	}
 }
@@ -278,6 +359,26 @@ func (rf *Raft) persist() {
 //
 // restore previously persisted state.
 //
+
+func (rf *Raft) newSpan(ctx context.Context, name string, opts ...opentracing.StartSpanOption) opentracing.Span {
+	parentSpan := opentracing.SpanFromContext(ctx)
+	if parentSpan == nil && opts == nil {
+		parentSpan = rf.mainSpan
+	}
+	if parentSpan != nil {
+		opts = append(opts, opentracing.ChildOf(parentSpan.Context()))
+	}
+	span := rf.tracer.StartSpan(name, opts...)
+	span.LogFields(
+		otlog.Int("term", rf.term),
+		otlog.String("state", rf.state.String()),
+		otlog.Int("voteFor", rf.voteFor),
+		otlog.Object("logs", rf.logs),
+		otlog.Int("lastApplied", rf.lastApplied),
+		otlog.Int("commitIndex", rf.commitIndex),
+	)
+	return span
+}
 func (rf *Raft) readPersist(data []byte) {
 	rf.log("readPersist")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -288,6 +389,8 @@ func (rf *Raft) readPersist(data []byte) {
 	term := 0
 	voteFor := 0
 	logs := []LogEntry{}
+	span := rf.newSpan(context.Background(), "readPersist")
+
 	if err := d.Decode(&logs); err != nil {
 		log.Fatalf("readPersist Error,%+v", err)
 	}
@@ -300,6 +403,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.term = term
 	rf.voteFor = voteFor
 	rf.logs = logs
+	span.LogFields(otlog.Object("data", rf.ToMap()))
+	span.Finish()
 	rf.log("readPersist %+v", rf.logs)
 }
 
@@ -329,10 +434,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Context      []byte
 	Term         int
 	Id           int
 	LastLogIndex int
 	LastLogTerm  int
+}
+
+func (a RequestVoteArgs) LogData() interface{} {
+	a.Context = nil
+	return a
 }
 
 //
@@ -352,10 +463,16 @@ type RequestVoteReply struct {
 func (rf *Raft) becomeFollower(term int) {
 	_, _, l, _ := runtime.Caller(1)
 	defer rf.persist()
+	span := rf.newSpan(context.Background(), "becomeFollower")
+	defer span.Finish()
 	rf.log("%v,becomeFollower:%v", l, term)
 	rf.state = Follower
+	if term > rf.term {
+		//只有term变更的时候才能把votefor重置
+		rf.voteFor = -1
+	}
 	rf.term = term
-	rf.voteFor = -1
+
 }
 
 const RequestVoteMsgAlreadyVoteFor = " already vote for on"
@@ -365,6 +482,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	spanCtx, err := rf.tracer.Extract(opentracing.Binary, bytes.NewReader(args.Context))
+	if err != nil {
+		log.Fatal(err)
+	}
+	span := rf.newSpan(
+		context.Background(), "receive RequestVote", opentracing.ChildOf(rf.mainSpan.Context()),
+	)
+	iSpan := rf.newSpan(
+		context.Background(), "receive RequestVote", opentracing.ChildOf(spanCtx),
+		opentracing.FollowsFrom(span.Context()),
+	)
+	defer span.Finish()
+	defer iSpan.Finish()
+	span.LogFields(otlog.Object("args", args.LogData()))
+	iSpan.LogFields(otlog.Object("args", args.LogData()))
 	reply.Term = rf.term
 	reply.Grant = false
 	if rf.term < args.Term {
@@ -383,7 +515,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteFor = args.Id
 		rf.electionTime.Reset(rf.newRandTimeOut())
 	}
-
+	span.LogFields(otlog.Object("reply", *reply))
+	iSpan.LogFields(otlog.Object("reply", *reply))
 	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", *args, *reply, rf.voteFor)
 }
 
@@ -395,12 +528,18 @@ func (rf *Raft) lastLog() LogEntry {
 }
 
 type AppendEntriesArgs struct {
+	Context     []byte
 	Term        int
 	Id          int
 	Entries     []LogEntry
 	PreLogIndex int
 	PreLogTerm  int
 	CommitIndex int
+}
+
+func (a AppendEntriesArgs) LogData() interface{} {
+	a.Context = nil
+	return a
 }
 
 type AppendEntriesReply struct {
@@ -416,18 +555,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	//rf.tracer.StartSpan()
+
+	spanCtx, err := rf.tracer.Extract(opentracing.Binary, bytes.NewReader(args.Context))
+	if err != nil {
+		log.Fatal(err)
+	}
+	span := rf.newSpan(
+		context.Background(), "receive HeartBeat",
+		opentracing.ChildOf(rf.mainSpan.Context()),
+	)
+	ispan := rf.newSpan(
+		context.Background(), "receive HeartBeat", opentracing.ChildOf(spanCtx),
+		opentracing.FollowsFrom(span.Context()),
+	)
+	span.LogFields(otlog.Object("args", args.LogData()))
+	ispan.LogFields(otlog.Object("args", args.LogData()))
+	defer span.Finish()
+	defer ispan.Finish()
 	reply.Term = rf.term
 	rf.electionTime.Reset(rf.newRandTimeOut())
 	defer rf.log("heartBeatRecv req:%+v,rsp:%+v", args, reply)
 	if args.Term < rf.term {
 		rf.state = Candidate
+		span.LogFields(otlog.Object("term too old becomeCandidate", args.LogData()))
+		ispan.LogFields(otlog.Object("term too old becomeCandidate", args.LogData()))
 		reply.Success = false
 		reply.Msg = AppendEntriesTermTooOld
 		return
 	}
+	//要判断term
+	if args.Term > rf.term {
+		rf.becomeFollower(args.Term)
+	}
 	if args.PreLogIndex >= len(rf.logs) || args.PreLogIndex != -1 && args.PreLogIndex < len(rf.logs) && args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
+		span.LogFields(otlog.Object("preLog term conflict", args.LogData()))
+		ispan.LogFields(otlog.Object("preLog term conflict", args.LogData()))
 		return
 	}
 	reply.Success = true
@@ -437,7 +602,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.CommitIndex > rf.commitIndex {
 		rf.commitIndex = min(args.CommitIndex, len(rf.logs)-1)
 	}
-
+	span.LogFields(otlog.Object("reply", *reply))
+	ispan.LogFields(otlog.Object("args", args.LogData()))
 }
 func min(a, b int) int {
 	if a > b {
@@ -532,7 +698,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.log("crash,save logs%+v", rf.logs)
 	atomic.StoreInt32(&rf.dead, 1)
+	span := rf.tracer.StartSpan("crash", opentracing.ChildOf(rf.mainSpan.Context()))
+	fmt.Printf("crash %d,%s\n", rf.me, rf.tracerName)
+
+	span.LogFields(otlog.Event("crash"), otlog.Object("data", rf.ToMap()))
+	span.Finish()
 	// Your code here, if desired.
+	//rf.mainSpan.Finish()
 }
 
 func (rf *Raft) killed() bool {
@@ -540,13 +712,24 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) End() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	time.Sleep(1 * time.Second)
+}
+
 // The  go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
+
+func (rf *Raft) logTrac(str string, args ...interface{}) {
+
+}
 func (rf *Raft) log(str string, args ...interface{}) {
+
 	fmt.Printf(
 		"%s,%+v\n", fmt.Sprintf(
 			fmt.Sprintf(
-				"raft(id:%v,term:%v,state:%v)##: %v", rf.me, rf.term, rf.state,
+				"raft(id:%v,term:%v,state:%v)##: %v", rf.tracerName, rf.term, rf.state,
 				str,
 			),
 			args...,
@@ -559,18 +742,26 @@ func (rf *Raft) newRandTimeOut() time.Duration {
 	return time.Duration(rand.Int()%150+100) * time.Millisecond
 }
 func (rf *Raft) ticker() {
-
 	for {
 		select {
+
 		case <-rf.electionTime.C:
 			rf.mu.Lock()
+			ctx := context.Background()
 			// rf.log("ticker term%v", rf.state)
+			span := rf.newSpan(ctx, "electionTimeout")
+			ctx = opentracing.ContextWithSpan(ctx, span)
 			if rf.state == Leader {
+				span.LogFields(otlog.Event("electionTimeout,but state already  Leader,continue"))
+				span.Finish()
 				rf.mu.Unlock()
 				continue
 			}
 			if rf.killed() == false {
-				rf.startElection()
+				span.LogFields(otlog.Event("electionTimeout,start Elelction"))
+
+				span.Finish()
+				rf.startElection(ctx)
 				rf.mu.Unlock()
 			}
 		}
@@ -595,6 +786,16 @@ func (rf *Raft) applyLoop() {
 						CommandIndex: i + 1,
 					},
 				)
+				span := rf.newSpan(context.Background(), "applyLog")
+				span.LogFields(
+					otlog.Object(
+						"appliedLog", ApplyMsg{
+							CommandValid: true,
+							Command:      rf.logs[i].Cmd,
+							CommandIndex: i + 1,
+						},
+					),
+				)
 			}
 		}
 
@@ -618,6 +819,7 @@ func Make(
 	peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg,
 ) *Raft {
+	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -625,7 +827,7 @@ func Make(
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.term = 1
-	rf.state = Follower
+	rf.state = Candidate
 	rf.voteFor = -1
 	rf.electionTime = time.NewTicker(rf.newRandTimeOut())
 	rf.applyChan = applyCh
@@ -634,11 +836,27 @@ func Make(
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
+	rf.tracerName = "raft-" + strconv.Itoa(os.Getppid()) + "-" + strconv.Itoa(me)
+	tracer, _ := tracing.Init(rf.tracerName)
+	rf.tracer = tracer
+	//defer closer.Close()
 	// start ticker goroutine to start elections
+	if len(persister.ReadRaftState()) == 0 {
+		rf.mainSpan = rf.tracer.StartSpan("start")
+		fmt.Printf("start %s", rf.tracerName)
+	} else {
+		rf.mainSpan = rf.tracer.StartSpan("restart")
+		fmt.Printf("restart %s", rf.tracerName)
+	}
+
+	rf.readPersist(persister.ReadRaftState())
+	//rf.mainSpan.SetTag("pGroup", strconv.Itoa(os.Getppid()))
+	//ctx := opentracing.ContextWithSpan(context.Background(), rf.mainSpan)
+	//tracer.StartSpan("s")
 	go rf.ticker()
 	go rf.sendHeartBeat()
 	go rf.applyLoop()
+	rf.mainSpan.Finish()
 	return rf
 }
