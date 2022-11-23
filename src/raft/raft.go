@@ -516,7 +516,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	span.LogFields(otlog.Object("reply", *reply))
 	iSpan.LogFields(otlog.Object("reply", *reply))
-	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", *args, *reply, rf.voteFor)
+	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", args.LogData(), *reply, rf.voteFor)
 }
 
 func (rf *Raft) lastLog() LogEntry {
@@ -538,6 +538,13 @@ type AppendEntriesArgs struct {
 
 func (a AppendEntriesArgs) LogData() interface{} {
 	a.Context = nil
+	var tmp []LogEntry
+	if len(a.Entries) > 6 {
+		tmp = append(tmp, a.Entries[:2]...)
+		tmp = append(tmp, LogEntry{Cmd: 12312312345, Term: -1})
+		tmp = append(tmp, a.Entries[len(a.Entries)-5:]...)
+	}
+	a.Entries = tmp
 	return a
 }
 
@@ -574,7 +581,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer ispan.Finish()
 	reply.Term = rf.term
 	rf.electionTime.Reset(rf.newRandTimeOut())
-	defer rf.log("heartBeatRecv req:%+v,rsp:%+v", args, reply)
+	defer rf.log("heartBeatRecv req:%+v,rsp:%+v", args.LogData(), reply)
 	if args.Term < rf.term {
 		rf.state = Candidate
 		span.LogFields(otlog.Object("term too old becomeCandidate", args.LogData()))
@@ -736,9 +743,19 @@ func (rf *Raft) log(str string, args ...interface{}) {
 				str,
 			),
 			args...,
-		), rf.logs,
+		), rf.last10Log(),
 	)
 
+}
+
+func (rf *Raft) last10Log() []LogEntry {
+	var tmp []LogEntry
+	if len(rf.logs) > 6 {
+		tmp = append(tmp, rf.logs[:2]...)
+		tmp = append(tmp, LogEntry{Cmd: 12312312345, Term: -1})
+		tmp = append(tmp, rf.logs[len(rf.logs)-5:]...)
+	}
+	return tmp
 }
 
 func (rf *Raft) newRandTimeOut() time.Duration {
