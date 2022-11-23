@@ -2,11 +2,10 @@ rm -rf batch_test_tmp
 mkdir batch_test_tmp
 
 function dotest() {
-  go test -run TestPersist12C >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
+  go test -run TestPersist22C >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
 }
 
 export -f dotest
-# 再开一个sh启动函数
 
 for ((i = 0; i < $1; i++)); do
   echo "start Test "$i"/"$1
@@ -16,7 +15,7 @@ for ((i = 0; i < $1; i++)); do
   wait
   echo "end Test "$i"/"$1
   grep -rn "FAIL" -B 2 batch_test_tmp/* >../failed.log
-  echo "Fail Count:"$(grep -o "FAIL: Test" batch_test_tmp/* | wc -l)"/"$j
+  echo "Fail Count:"$(grep -o "FAIL" batch_test_tmp/* | wc -l)"/"$j
 done
 
 

@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"github.com/opentracing/opentracing-go"
 	otlog "github.com/opentracing/opentracing-go/log"
-	"github.com/yurishkuro/opentracing-tutorial/go/lib/tracing"
+	otConfig "github.com/uber/jaeger-client-go/config"
 	"log"
 	"math/rand"
 	"os"
@@ -192,30 +192,30 @@ func (rf *Raft) startElection(ctx context.Context) {
 			}
 			args.Context = spanCtx.Bytes()
 
-			rf.sendRequestVote(server, args, reply)
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-
-			span.LogFields(otlog.Object("reply", *reply))
-			if rf.term == startTerm && reply.Grant { //避免之前的投票导致重新当回leader
-				voteCount++
-				if rf.state == Candidate {
-					if voteCount*2 >= len(rf.peers)+1 {
-						rf.becomeLeader()
-						return
+			ok := rf.sendRequestVote(server, args, reply)
+			if ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				span.LogFields(otlog.Object("reply", *reply))
+				if rf.term == startTerm && reply.Grant { //避免之前的投票导致重新当回leader
+					voteCount++
+					if rf.state == Candidate {
+						if voteCount*2 >= len(rf.peers)+1 {
+							rf.becomeLeader()
+							return
+						}
 					}
 				}
-			}
-			if reply.Term > startTerm {
-				rf.voteFor = -1
-				rf.log("to Follower")
-				rf.becomeFollower(reply.Term)
-				return
+				if reply.Term > startTerm {
+					rf.becomeFollower(reply.Term)
+					return
+				}
+			} else {
+				rf.log("failed sendRequestVote")
 			}
 		}(i)
 	}
 	//go rf.ticker()
-
 }
 
 func (rf *Raft) sendHeartBeat() {
@@ -235,14 +235,13 @@ func (rf *Raft) sendHeartBeat() {
 
 		//opentracing
 		//	不能够协程去调用，可能会导致出现Follower发心跳
-		go func() {
+		func() {
+			defer rf.mu.Unlock()
 			fspan := rf.newSpan(context.Background(), "sendHeartBeat")
 			rf.matchIndex[rf.me] = len(rf.logs) - 1
 			for i, _ := range rf.peers {
-				rf.mu.Lock()
 				if i == rf.me {
 					rf.updateCommitIndex()
-					rf.mu.Unlock()
 					continue
 				}
 				span := rf.tracer.StartSpan("send to "+strconv.Itoa(i), opentracing.ChildOf(fspan.Context()))
@@ -271,7 +270,6 @@ func (rf *Raft) sendHeartBeat() {
 					Context:     spanCtx.Bytes(),
 				}
 				reply := &AppendEntriesReply{}
-				rf.mu.Unlock()
 				go func(server int) {
 					span.LogFields(
 						otlog.String("to", strconv.Itoa(server)),
@@ -287,16 +285,17 @@ func (rf *Raft) sendHeartBeat() {
 					defer span.Finish()
 					defer rf.mu.Unlock()
 					//要判断leader
-					if rf.state != Leader {
-						return
-					}
+
 					if reply.Term > rf.term {
 						rf.becomeFollower(reply.Term)
 						return
 					}
+					if rf.state != Leader {
+						return
+					}
 					if reply.Success {
 						rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
-						rf.nextIndex[server] = rf.matchIndex[server] + 1
+						rf.nextIndex[server] = min(rf.matchIndex[server]+1, len(rf.logs))
 						rf.updateCommitIndex()
 					} else {
 						if rf.nextIndex[server] >= 1 {
@@ -308,7 +307,7 @@ func (rf *Raft) sendHeartBeat() {
 			fspan.Finish()
 		}()
 		//fspan.Finish()
-		rf.mu.Unlock()
+
 	}
 }
 
@@ -583,11 +582,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Msg = AppendEntriesTermTooOld
 		return
-	}
-	//要判断term
-	if args.Term > rf.term {
+	} else if args.Term > rf.term { //要判断term
 		rf.becomeFollower(args.Term)
+	} else if rf.state != Follower {
+		rf.state = Follower
 	}
+
 	if args.PreLogIndex >= len(rf.logs) || args.PreLogIndex != -1 && args.PreLogIndex < len(rf.logs) && args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
@@ -600,13 +600,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.logs = append(rf.logs, args.Entries...)
 
 	if args.CommitIndex > rf.commitIndex {
+		//在某些网络不好的情况下，可能会导致心跳乱序，出现commitIndex更新 但是log还没有到位的情况，所以需要min一下
 		rf.commitIndex = min(args.CommitIndex, len(rf.logs)-1)
 	}
 	span.LogFields(otlog.Object("reply", *reply))
 	ispan.LogFields(otlog.Object("args", args.LogData()))
 }
+
+//!!! 写错了
 func min(a, b int) int {
-	if a > b {
+	if a < b {
 		return a
 	}
 	return b
@@ -726,10 +729,10 @@ func (rf *Raft) logTrac(str string, args ...interface{}) {
 }
 func (rf *Raft) log(str string, args ...interface{}) {
 
-	fmt.Printf(
+	log.Printf(
 		"%s,%+v\n", fmt.Sprintf(
 			fmt.Sprintf(
-				"raft(id:%v,term:%v,state:%v)##: %v", rf.tracerName, rf.term, rf.state,
+				"raft(id:%v,term:%v,state:%v,votefor:%v)##: %v", rf.tracerName, rf.term, rf.state, rf.voteFor,
 				str,
 			),
 			args...,
@@ -759,8 +762,8 @@ func (rf *Raft) ticker() {
 			}
 			if rf.killed() == false {
 				span.LogFields(otlog.Event("electionTimeout,start Elelction"))
-
 				span.Finish()
+				rf.log(" electionTimeout startElection")
 				rf.startElection(ctx)
 				rf.mu.Unlock()
 			}
@@ -838,7 +841,23 @@ func Make(
 	// initialize from state persisted before a crash
 
 	rf.tracerName = "raft-" + strconv.Itoa(os.Getppid()) + "-" + strconv.Itoa(me)
-	tracer, _ := tracing.Init(rf.tracerName)
+
+	cfg := &otConfig.Configuration{
+		ServiceName: rf.tracerName,
+		Sampler: &otConfig.SamplerConfig{
+			Type:  "const",
+			Param: 1,
+		},
+		Reporter: &otConfig.ReporterConfig{
+			LogSpans: false,
+		},
+	}
+	tracer, _, err := cfg.NewTracer()
+	if err != nil {
+		panic(fmt.Sprintf("ERROR: cannot init Jaeger: %v\n", err))
+	}
+
+	//tracer, _ := tracing.Init(rf.tracerName)
 	rf.tracer = tracer
 	//defer closer.Close()
 	// start ticker goroutine to start elections
