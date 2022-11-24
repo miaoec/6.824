@@ -2,7 +2,7 @@ rm -rf batch_test_tmp
 mkdir batch_test_tmp
 
 function dotest() {
-  go test -run TestPersist22C >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
+  go test -run TestFigure8Unreliable2C >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
 }
 
 export -f dotest
