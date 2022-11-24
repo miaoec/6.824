@@ -925,7 +925,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, 1, true)
 
 	nup := servers
-	for iters := 0; iters < 1000; iters++ {
+	for iters := 0; iters < 2000; iters++ {
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -963,6 +963,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				nup += 1
 			}
 		}
+
 	}
 
 	for i := 0; i < servers; i++ {
@@ -970,8 +971,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
-	cfg.one(rand.Int()%10000, servers, true)
+	n := rand.Int() % 10000
+	log.Printf("try none %v", n)
+	cfg.one(n, servers, true)
 
 	cfg.end()
 }
@@ -1259,4 +1261,9 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 		}
 	}
 	cfg.end()
+}
+
+func TestName(t *testing.T) {
+	a := []int{1, 2, 3}
+	t.Log(a[:0])
 }
