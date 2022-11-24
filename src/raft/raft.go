@@ -22,9 +22,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/opentracing/opentracing-go"
-	otlog "github.com/opentracing/opentracing-go/log"
-	otConfig "github.com/uber/jaeger-client-go/config"
 	"log"
 	"math/rand"
 	"os"
@@ -111,9 +108,7 @@ type Raft struct {
 
 	applyChan chan ApplyMsg
 
-	tracer     opentracing.Tracer
 	tracerName string
-	mainSpan   opentracing.Span
 }
 
 func (rf *Raft) ToMap() map[string]interface{} {
@@ -147,13 +142,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) becomeLeader() {
 	_, _, l, _ := runtime.Caller(1)
 	rf.log("%v,becomeLeader", l)
-	span := rf.newSpan(context.Background(), "becomeLeader")
-	defer span.Finish()
 	rf.state = Leader
+	//noop log
+	rf.logs = append(rf.logs, LogEntry{Cmd: 0, Term: rf.term})
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = len(rf.logs)
 		rf.matchIndex[i] = -1
 	}
+
 }
 
 func (rf *Raft) startElection(ctx context.Context) {
@@ -165,8 +161,6 @@ func (rf *Raft) startElection(ctx context.Context) {
 	voteCount := 1
 
 	rf.persist()
-	pSpan := rf.newSpan(ctx, "sendRequestVote")
-	defer pSpan.Finish()
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -180,23 +174,10 @@ func (rf *Raft) startElection(ctx context.Context) {
 		reply := &RequestVoteReply{}
 
 		go func(server int) {
-			span := rf.newSpan(
-				context.Background(), "send voteReq to "+strconv.Itoa(server), opentracing.ChildOf(pSpan.Context()),
-			)
-			defer span.Finish()
-			span.LogFields(otlog.Object("args", args.LogData()))
-			spanCtx := new(bytes.Buffer)
-			err := span.Tracer().Inject(span.Context(), opentracing.Binary, spanCtx)
-			if err != nil {
-				log.Fatal(err)
-			}
-			args.Context = spanCtx.Bytes()
-
 			ok := rf.sendRequestVote(server, args, reply)
 			if ok {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				span.LogFields(otlog.Object("reply", *reply))
 				if rf.term == startTerm && reply.Grant { //避免之前的投票导致重新当回leader
 					voteCount++
 					if rf.state == Candidate {
@@ -211,7 +192,7 @@ func (rf *Raft) startElection(ctx context.Context) {
 					return
 				}
 			} else {
-				rf.log("failed sendRequestVote")
+				rf.log("failed sendRequestVote to%v", server)
 			}
 		}(i)
 	}
@@ -222,7 +203,7 @@ func (rf *Raft) sendHeartBeat() {
 	//oldState := Candidate
 	//var fspan opentracing.Span
 	for {
-		time.Sleep(time.Duration(50) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.killed() {
 			rf.mu.Unlock()
@@ -237,24 +218,18 @@ func (rf *Raft) sendHeartBeat() {
 		//	不能够协程去调用，可能会导致出现Follower发心跳
 		func() {
 			defer rf.mu.Unlock()
-			fspan := rf.newSpan(context.Background(), "sendHeartBeat")
 			rf.matchIndex[rf.me] = len(rf.logs) - 1
 			for i, _ := range rf.peers {
 				if i == rf.me {
 					rf.updateCommitIndex()
 					continue
 				}
-				span := rf.tracer.StartSpan("send to "+strconv.Itoa(i), opentracing.ChildOf(fspan.Context()))
-				spanCtx := new(bytes.Buffer)
-				err := span.Tracer().Inject(span.Context(), opentracing.Binary, spanCtx)
-				if err != nil {
-					log.Fatal(err)
-				}
+
 				var entries []LogEntry
 				preLog := LogEntry{Term: -1}
 
 				if rf.nextIndex[i] < len(rf.logs) {
-					entries = rf.logs[rf.nextIndex[i]:]
+					entries = rf.logs[max(rf.nextIndex[i], 0):]
 				}
 				if rf.nextIndex[i] >= 1 {
 					preLog = rf.logs[rf.nextIndex[i]-1]
@@ -267,44 +242,39 @@ func (rf *Raft) sendHeartBeat() {
 					PreLogIndex: rf.nextIndex[i] - 1,
 					PreLogTerm:  preLog.Term,
 					Entries:     entries,
-					Context:     spanCtx.Bytes(),
+					Context:     nil,
 				}
 				reply := &AppendEntriesReply{}
 				go func(server int) {
-					span.LogFields(
-						otlog.String("to", strconv.Itoa(server)),
-						otlog.Object("args", args.LogData()),
-						otlog.Object("data", rf.ToMap()),
-					)
-					rf.sendAppendEntries(server, args, reply)
-					rf.mu.Lock()
+					ok := rf.sendAppendEntries(server, args, reply)
+					if ok {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
+						//要判断leader
 
-					span.LogFields(
-						otlog.Object("reply", reply),
-					)
-					defer span.Finish()
-					defer rf.mu.Unlock()
-					//要判断leader
-
-					if reply.Term > rf.term {
-						rf.becomeFollower(reply.Term)
-						return
-					}
-					if rf.state != Leader {
-						return
-					}
-					if reply.Success {
-						rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
-						rf.nextIndex[server] = min(rf.matchIndex[server]+1, len(rf.logs))
-						rf.updateCommitIndex()
-					} else {
-						if rf.nextIndex[server] >= 1 {
-							rf.nextIndex[server]--
+						if reply.Term > rf.term {
+							rf.becomeFollower(reply.Term)
+							return
 						}
+						if rf.state != Leader {
+							return
+						}
+						if reply.Success {
+							rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
+							rf.nextIndex[server] = min(rf.matchIndex[server]+1, len(rf.logs))
+							rf.updateCommitIndex()
+						} else {
+							rf.nextIndex[server] = max(reply.ConflictIndex, 0)
+							//if rf.nextIndex[server] >= 1 {
+							//	rf.nextIndex[server]--
+							//}
+						}
+					} else {
+						rf.log("faild send entries to%v", server)
 					}
+
 				}(i)
 			}
-			fspan.Finish()
 		}()
 		//fspan.Finish()
 
@@ -359,25 +329,6 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 
-func (rf *Raft) newSpan(ctx context.Context, name string, opts ...opentracing.StartSpanOption) opentracing.Span {
-	parentSpan := opentracing.SpanFromContext(ctx)
-	if parentSpan == nil && opts == nil {
-		parentSpan = rf.mainSpan
-	}
-	if parentSpan != nil {
-		opts = append(opts, opentracing.ChildOf(parentSpan.Context()))
-	}
-	span := rf.tracer.StartSpan(name, opts...)
-	span.LogFields(
-		otlog.Int("term", rf.term),
-		otlog.String("state", rf.state.String()),
-		otlog.Int("voteFor", rf.voteFor),
-		otlog.Object("logs", rf.logs),
-		otlog.Int("lastApplied", rf.lastApplied),
-		otlog.Int("commitIndex", rf.commitIndex),
-	)
-	return span
-}
 func (rf *Raft) readPersist(data []byte) {
 	rf.log("readPersist")
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -388,8 +339,6 @@ func (rf *Raft) readPersist(data []byte) {
 	term := 0
 	voteFor := 0
 	logs := []LogEntry{}
-	span := rf.newSpan(context.Background(), "readPersist")
-
 	if err := d.Decode(&logs); err != nil {
 		log.Fatalf("readPersist Error,%+v", err)
 	}
@@ -402,8 +351,6 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.term = term
 	rf.voteFor = voteFor
 	rf.logs = logs
-	span.LogFields(otlog.Object("data", rf.ToMap()))
-	span.Finish()
 	rf.log("readPersist %+v", rf.logs)
 }
 
@@ -462,8 +409,6 @@ type RequestVoteReply struct {
 func (rf *Raft) becomeFollower(term int) {
 	_, _, l, _ := runtime.Caller(1)
 	defer rf.persist()
-	span := rf.newSpan(context.Background(), "becomeFollower")
-	defer span.Finish()
 	rf.log("%v,becomeFollower:%v", l, term)
 	rf.state = Follower
 	if term > rf.term {
@@ -481,32 +426,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	spanCtx, err := rf.tracer.Extract(opentracing.Binary, bytes.NewReader(args.Context))
-	if err != nil {
-		log.Fatal(err)
-	}
-	span := rf.newSpan(
-		context.Background(), "receive RequestVote", opentracing.ChildOf(rf.mainSpan.Context()),
-	)
-	iSpan := rf.newSpan(
-		context.Background(), "receive RequestVote", opentracing.ChildOf(spanCtx),
-		opentracing.FollowsFrom(span.Context()),
-	)
-	defer span.Finish()
-	defer iSpan.Finish()
-	span.LogFields(otlog.Object("args", args.LogData()))
-	iSpan.LogFields(otlog.Object("args", args.LogData()))
 	reply.Term = rf.term
 	reply.Grant = false
 	if rf.term < args.Term {
 		rf.becomeFollower(args.Term)
 	}
-	//mark: 这里比较candidate的日志算法比较新的逻辑是关键，先比较最后一条日志的任期，任期大的日志新，如果任期相同比较index，index长的日志新
+
 	if rf.voteFor != -1 {
 		reply.Msg = RequestVoteMsgAlreadyVoteFor + strconv.Itoa(rf.term)
 		return
 	}
-	if rf.term <= args.Term && rf.voteFor == -1 &&
+	//mark: 这里比较candidate的日志算法比较新的逻辑是关键，先比较最后一条日志的任期，任期大的日志新，如果任期相同比较index，index长的日志新
+	if rf.term <= args.Term && (rf.voteFor == -1 || rf.voteFor == args.Id) &&
 		(rf.lastLog().Term < args.LastLogTerm ||
 			rf.lastLog().Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex+1) {
 		reply.Term = rf.term
@@ -514,8 +445,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.voteFor = args.Id
 		rf.electionTime.Reset(rf.newRandTimeOut())
 	}
-	span.LogFields(otlog.Object("reply", *reply))
-	iSpan.LogFields(otlog.Object("reply", *reply))
 	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", args.LogData(), *reply, rf.voteFor)
 }
 
@@ -543,15 +472,18 @@ func (a AppendEntriesArgs) LogData() interface{} {
 		tmp = append(tmp, a.Entries[:2]...)
 		tmp = append(tmp, LogEntry{Cmd: 12312312345, Term: -1})
 		tmp = append(tmp, a.Entries[len(a.Entries)-5:]...)
+		a.Entries = tmp
 	}
-	a.Entries = tmp
+
 	return a
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
-	Msg     string
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
+	Msg           string
 }
 
 const AppendEntriesTermTooOld = "term too old "
@@ -563,29 +495,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.persist()
 	//rf.tracer.StartSpan()
 
-	spanCtx, err := rf.tracer.Extract(opentracing.Binary, bytes.NewReader(args.Context))
-	if err != nil {
-		log.Fatal(err)
-	}
-	span := rf.newSpan(
-		context.Background(), "receive HeartBeat",
-		opentracing.ChildOf(rf.mainSpan.Context()),
-	)
-	ispan := rf.newSpan(
-		context.Background(), "receive HeartBeat", opentracing.ChildOf(spanCtx),
-		opentracing.FollowsFrom(span.Context()),
-	)
-	span.LogFields(otlog.Object("args", args.LogData()))
-	ispan.LogFields(otlog.Object("args", args.LogData()))
-	defer span.Finish()
-	defer ispan.Finish()
 	reply.Term = rf.term
 	rf.electionTime.Reset(rf.newRandTimeOut())
 	defer rf.log("heartBeatRecv req:%+v,rsp:%+v", args.LogData(), reply)
 	if args.Term < rf.term {
 		rf.state = Candidate
-		span.LogFields(otlog.Object("term too old becomeCandidate", args.LogData()))
-		ispan.LogFields(otlog.Object("term too old becomeCandidate", args.LogData()))
 		reply.Success = false
 		reply.Msg = AppendEntriesTermTooOld
 		return
@@ -595,28 +509,57 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = Follower
 	}
 
-	if args.PreLogIndex >= len(rf.logs) || args.PreLogIndex != -1 && args.PreLogIndex < len(rf.logs) && args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
+	if args.PreLogIndex >= len(rf.logs) {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
-		span.LogFields(otlog.Object("preLog term conflict", args.LogData()))
-		ispan.LogFields(otlog.Object("preLog term conflict", args.LogData()))
+		//reply.ConflictIndex =
+		reply.ConflictIndex = len(rf.logs) - 1
+		return
+	}
+	if args.PreLogIndex != -1 && args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
+		reply.Success = false
+		reply.Msg = AppendEntriesPreLogTConflict
+		if args.PreLogIndex == 0 {
+			reply.ConflictIndex = 0
+		} else {
+			for i := args.PreLogIndex - 1; i >= rf.commitIndex; i-- {
+				if rf.logs[i].Term != rf.logs[args.PreLogIndex].Term {
+					reply.ConflictIndex = i
+					break
+				}
+			}
+		}
+
+		//reply.ConflictIndex =
 		return
 	}
 	reply.Success = true
-	rf.logs = rf.logs[:args.PreLogIndex+1]
-	rf.logs = append(rf.logs, args.Entries...)
-
+	//可能收到延时的重复日志附加请求而导致日志不必要的截断，从而导致已经提交的日志丢失。
+	//rf.logs = rf.logs[:args.PreLogIndex+1]
+	//rf.logs = append(rf.logs, args.Entries...)
+	for i, entry := range args.Entries {
+		if args.PreLogIndex+1+i >= len(rf.logs) || rf.logs[args.PreLogIndex+1+i].Term != entry.Term {
+			rf.logs = rf.logs[:args.PreLogIndex+1+i]
+			rf.logs = append(rf.logs, args.Entries[i:]...)
+			break
+		}
+	}
 	if args.CommitIndex > rf.commitIndex {
+
 		//在某些网络不好的情况下，可能会导致心跳乱序，出现commitIndex更新 但是log还没有到位的情况，所以需要min一下
 		rf.commitIndex = min(args.CommitIndex, len(rf.logs)-1)
 	}
-	span.LogFields(otlog.Object("reply", *reply))
-	ispan.LogFields(otlog.Object("args", args.LogData()))
 }
 
 //!!! 写错了
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
@@ -708,11 +651,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	rf.log("crash,save logs%+v", rf.logs)
 	atomic.StoreInt32(&rf.dead, 1)
-	span := rf.tracer.StartSpan("crash", opentracing.ChildOf(rf.mainSpan.Context()))
-	fmt.Printf("crash %d,%s\n", rf.me, rf.tracerName)
-
-	span.LogFields(otlog.Event("crash"), otlog.Object("data", rf.ToMap()))
-	span.Finish()
 	// Your code here, if desired.
 	//rf.mainSpan.Finish()
 }
@@ -754,32 +692,27 @@ func (rf *Raft) last10Log() []LogEntry {
 		tmp = append(tmp, rf.logs[:2]...)
 		tmp = append(tmp, LogEntry{Cmd: 12312312345, Term: -1})
 		tmp = append(tmp, rf.logs[len(rf.logs)-5:]...)
+	} else {
+		return rf.logs
 	}
 	return tmp
 }
 
 func (rf *Raft) newRandTimeOut() time.Duration {
-	return time.Duration(rand.Int()%150+100) * time.Millisecond
+	return time.Duration(rand.Int()%200+200) * time.Millisecond
 }
 func (rf *Raft) ticker() {
 	for {
 		select {
-
 		case <-rf.electionTime.C:
 			rf.mu.Lock()
 			ctx := context.Background()
 			// rf.log("ticker term%v", rf.state)
-			span := rf.newSpan(ctx, "electionTimeout")
-			ctx = opentracing.ContextWithSpan(ctx, span)
 			if rf.state == Leader {
-				span.LogFields(otlog.Event("electionTimeout,but state already  Leader,continue"))
-				span.Finish()
 				rf.mu.Unlock()
 				continue
 			}
 			if rf.killed() == false {
-				span.LogFields(otlog.Event("electionTimeout,start Elelction"))
-				span.Finish()
 				rf.log(" electionTimeout startElection")
 				rf.startElection(ctx)
 				rf.mu.Unlock()
@@ -805,16 +738,6 @@ func (rf *Raft) applyLoop() {
 						Command:      rf.logs[i].Cmd,
 						CommandIndex: i + 1,
 					},
-				)
-				span := rf.newSpan(context.Background(), "applyLog")
-				span.LogFields(
-					otlog.Object(
-						"appliedLog", ApplyMsg{
-							CommandValid: true,
-							Command:      rf.logs[i].Cmd,
-							CommandIndex: i + 1,
-						},
-					),
 				)
 			}
 		}
@@ -859,32 +782,7 @@ func Make(
 
 	rf.tracerName = "raft-" + strconv.Itoa(os.Getppid()) + "-" + strconv.Itoa(me)
 
-	cfg := &otConfig.Configuration{
-		ServiceName: rf.tracerName,
-		Sampler: &otConfig.SamplerConfig{
-			Type:  "const",
-			Param: 1,
-		},
-		Reporter: &otConfig.ReporterConfig{
-			LogSpans: false,
-		},
-	}
-	tracer, _, err := cfg.NewTracer()
-	if err != nil {
-		panic(fmt.Sprintf("ERROR: cannot init Jaeger: %v\n", err))
-	}
-
 	//tracer, _ := tracing.Init(rf.tracerName)
-	rf.tracer = tracer
-	//defer closer.Close()
-	// start ticker goroutine to start elections
-	if len(persister.ReadRaftState()) == 0 {
-		rf.mainSpan = rf.tracer.StartSpan("start")
-		fmt.Printf("start %s", rf.tracerName)
-	} else {
-		rf.mainSpan = rf.tracer.StartSpan("restart")
-		fmt.Printf("restart %s", rf.tracerName)
-	}
 
 	rf.readPersist(persister.ReadRaftState())
 	//rf.mainSpan.SetTag("pGroup", strconv.Itoa(os.Getppid()))
@@ -893,6 +791,5 @@ func Make(
 	go rf.ticker()
 	go rf.sendHeartBeat()
 	go rf.applyLoop()
-	rf.mainSpan.Finish()
 	return rf
 }
