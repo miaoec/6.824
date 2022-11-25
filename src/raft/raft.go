@@ -49,6 +49,7 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 //
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -99,9 +100,13 @@ type Raft struct {
 	voteFor      int
 	electionTime *time.Ticker
 
-	logs        []LogEntry
-	commitIndex int
-	lastApplied int
+	//logs  []LogEntry
+	logs2 []LogEntry
+	//snapshot:[0:lastIncludeLogIndex),logs:[lastIncludeLogIndex:++]
+	lastIncludeLogIndex int
+	lastIncludeTerm     int
+	commitIndex         int
+	lastApplied         int
 
 	nextIndex  []int
 	matchIndex []int
@@ -111,18 +116,52 @@ type Raft struct {
 	tracerName string
 }
 
+func (rf *Raft) indexLog(index int) LogEntry {
+	if index <= rf.lastIncludeLogIndex {
+		panic("index(" + strconv.Itoa(index) + ")<rf.lastIncludeLogIndex")
+	}
+	return rf.logs2[index-rf.lastIncludeLogIndex-1]
+}
+
+//[l,r)
+func (rf *Raft) rangeLog(l, r int) []LogEntry {
+	if r == -1 {
+		r = len(rf.logs2) + rf.lastIncludeLogIndex + 1
+	}
+	l = max(l, 0)
+	if l <= rf.lastIncludeLogIndex {
+		panic("range(" + strconv.Itoa(l) + "," + strconv.Itoa(r) + ")<rf.lastIncludeTerm")
+	}
+	return rf.logs2[l-rf.lastIncludeLogIndex-1 : r-rf.lastIncludeLogIndex-1]
+
+}
+
+func (rf *Raft) lastLog() LogEntry {
+	//return
+	//return LogEntry{}
+	if len(rf.logs2) != 0 {
+		return rf.logs2[len(rf.logs2)-1]
+	}
+	return LogEntry{Term: rf.lastIncludeTerm}
+}
+
+func (rf *Raft) lastIndex() int {
+	return rf.lastIncludeLogIndex + len(rf.logs2)
+}
+
 func (rf *Raft) ToMap() map[string]interface{} {
 	return map[string]interface{}{
 		"state":   rf.state,
 		"term":    rf.term,
-		"logs":    rf.logs,
+		"logs":    rf.logs2,
 		"voteFor": rf.voteFor,
 	}
 }
 
 type LogEntry struct {
-	Cmd  interface{}
-	Term int
+	Cmd   interface{}
+	Index interface{}
+	Term  int
 }
 
 // return currentTerm and whether this server
@@ -144,9 +183,9 @@ func (rf *Raft) becomeLeader() {
 	rf.log("%v,becomeLeader", l)
 	rf.state = Leader
 	//noop log
-	rf.logs = append(rf.logs, LogEntry{Cmd: 0, Term: rf.term})
+	rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term})
 	for i, _ := range rf.peers {
-		rf.nextIndex[i] = len(rf.logs)
+		rf.nextIndex[i] = rf.lastIndex() + 1
 		rf.matchIndex[i] = -1
 	}
 
@@ -169,7 +208,7 @@ func (rf *Raft) startElection(ctx context.Context) {
 			Term:         startTerm,
 			Id:           rf.me,
 			LastLogTerm:  rf.lastLog().Term,
-			LastLogIndex: len(rf.logs) - 1,
+			LastLogIndex: rf.lastIndex(),
 		}
 		reply := &RequestVoteReply{}
 
@@ -196,12 +235,9 @@ func (rf *Raft) startElection(ctx context.Context) {
 			}
 		}(i)
 	}
-	//go rf.ticker()
 }
 
 func (rf *Raft) sendHeartBeat() {
-	//oldState := Candidate
-	//var fspan opentracing.Span
 	for {
 		time.Sleep(time.Duration(100) * time.Millisecond)
 		rf.mu.Lock()
@@ -218,21 +254,20 @@ func (rf *Raft) sendHeartBeat() {
 		//	不能够协程去调用，可能会导致出现Follower发心跳
 		func() {
 			defer rf.mu.Unlock()
-			rf.matchIndex[rf.me] = len(rf.logs) - 1
+			rf.matchIndex[rf.me] = rf.lastIndex()
 			for i, _ := range rf.peers {
 				if i == rf.me {
 					rf.updateCommitIndex()
 					continue
 				}
-
 				var entries []LogEntry
 				preLog := LogEntry{Term: -1}
 
-				if rf.nextIndex[i] < len(rf.logs) {
-					entries = rf.logs[max(rf.nextIndex[i], 0):]
+				if rf.nextIndex[i] <= rf.lastIndex() {
+					entries = rf.rangeLog(max(rf.nextIndex[i], 0), -1)
 				}
 				if rf.nextIndex[i] >= 1 {
-					preLog = rf.logs[rf.nextIndex[i]-1]
+					preLog = rf.indexLog(rf.nextIndex[i] - 1)
 				}
 				rf.log("send entries(%v): nextIndex:%v,matchIndex:%v", i, rf.nextIndex[i], rf.matchIndex[i])
 				args := &AppendEntriesArgs{
@@ -261,7 +296,7 @@ func (rf *Raft) sendHeartBeat() {
 						}
 						if reply.Success {
 							rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
-							rf.nextIndex[server] = min(rf.matchIndex[server]+1, len(rf.logs))
+							rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
 							rf.updateCommitIndex()
 						} else {
 							rf.nextIndex[server] = max(reply.ConflictIndex, 0)
@@ -276,15 +311,13 @@ func (rf *Raft) sendHeartBeat() {
 				}(i)
 			}
 		}()
-		//fspan.Finish()
-
 	}
 }
 
 //leader 不能够主动提交之前任期的日志
 func (rf *Raft) updateCommitIndex() {
 	idx := rf.getMajorityMatchIndex()
-	if idx >= 0 && rf.logs[idx].Term == rf.term {
+	if idx >= 0 && rf.indexLog(idx).Term == rf.term {
 		rf.commitIndex = idx
 	}
 }
@@ -313,16 +346,17 @@ func (rf *Raft) getMajorityMatchIndex() int {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
+
+	rf.persister.SaveRaftState(rf.getState())
+}
+
+func (rf *Raft) getState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(rf.logs) != nil || e.Encode(rf.voteFor) != nil || e.Encode(rf.term) != nil {
+	if e.Encode(rf.logs2) != nil || e.Encode(rf.voteFor) != nil || e.Encode(rf.term) != nil {
 		log.Fatal("encode Error")
 	}
-	data := w.Bytes()
-	//rf.log("")
-	rf.persister.SaveRaftState(data)
+	return w.Bytes()
 }
 
 //
@@ -350,8 +384,8 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	rf.term = term
 	rf.voteFor = voteFor
-	rf.logs = logs
-	rf.log("readPersist %+v", rf.logs)
+	rf.logs2 = logs
+	rf.log("readPersist %+v", rf.logs2)
 }
 
 //
@@ -371,6 +405,11 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.lastIncludeLogIndex = index
+	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
+	//rf.persister.SaveRaftState()
 
 }
 
@@ -439,7 +478,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//mark: 这里比较candidate的日志算法比较新的逻辑是关键，先比较最后一条日志的任期，任期大的日志新，如果任期相同比较index，index长的日志新
 	if rf.term <= args.Term && (rf.voteFor == -1 || rf.voteFor == args.Id) &&
 		(rf.lastLog().Term < args.LastLogTerm ||
-			rf.lastLog().Term == args.LastLogTerm && len(rf.logs) <= args.LastLogIndex+1) {
+			rf.lastLog().Term == args.LastLogTerm && rf.lastIndex() <= args.LastLogIndex) {
 		reply.Term = rf.term
 		reply.Grant = true
 		rf.voteFor = args.Id
@@ -448,12 +487,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.log("req:%+v,rsp%+v,voteFor:%+v", args.LogData(), *reply, rf.voteFor)
 }
 
-func (rf *Raft) lastLog() LogEntry {
-	if len(rf.logs) != 0 {
-		return rf.logs[len(rf.logs)-1]
-	}
-	return LogEntry{Term: -1}
-}
+//func (rf *Raft) lastLog() LogEntry {
+//	if len(rf.logs) != 0 {
+//		return rf.logs[len(rf.logs)-1]
+//	}
+//	return LogEntry{Term: -1}
+//}
 
 type AppendEntriesArgs struct {
 	Context     []byte
@@ -509,28 +548,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = Follower
 	}
 
-	if args.PreLogIndex >= len(rf.logs) {
+	if args.PreLogIndex > rf.lastIndex() {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
-		//reply.ConflictIndex =
-		reply.ConflictIndex = len(rf.logs) - 1
+		reply.ConflictIndex = rf.lastIndex()
 		return
 	}
-	if args.PreLogIndex != -1 && args.PreLogTerm != rf.logs[args.PreLogIndex].Term {
+	if args.PreLogIndex != -1 && args.PreLogTerm != rf.indexLog(args.PreLogIndex).Term {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
 		if args.PreLogIndex == 0 {
 			reply.ConflictIndex = 0
 		} else {
 			for i := args.PreLogIndex - 1; i >= rf.commitIndex; i-- {
-				if rf.logs[i].Term != rf.logs[args.PreLogIndex].Term {
+				if i == 0 || rf.indexLog(i).Term != rf.indexLog(args.PreLogIndex).Term {
 					reply.ConflictIndex = i
 					break
 				}
 			}
 		}
-
-		//reply.ConflictIndex =
 		return
 	}
 	reply.Success = true
@@ -538,16 +574,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//rf.logs = rf.logs[:args.PreLogIndex+1]
 	//rf.logs = append(rf.logs, args.Entries...)
 	for i, entry := range args.Entries {
-		if args.PreLogIndex+1+i >= len(rf.logs) || rf.logs[args.PreLogIndex+1+i].Term != entry.Term {
-			rf.logs = rf.logs[:args.PreLogIndex+1+i]
-			rf.logs = append(rf.logs, args.Entries[i:]...)
+		if args.PreLogIndex+1+i > rf.lastIndex() || rf.indexLog(args.PreLogIndex+1+i).Term != entry.Term {
+			rf.logs2 = rf.rangeLog(0, args.PreLogIndex+1+i)
+			rf.logs2 = append(rf.logs2, args.Entries[i:]...)
 			break
 		}
 	}
 	if args.CommitIndex > rf.commitIndex {
 
 		//在某些网络不好的情况下，可能会导致心跳乱序，出现commitIndex更新 但是log还没有到位的情况，所以需要min一下
-		rf.commitIndex = min(args.CommitIndex, len(rf.logs)-1)
+		rf.commitIndex = min(args.CommitIndex, rf.lastIndex())
 	}
 }
 
@@ -628,10 +664,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader = rf.state == Leader
 	if rf.state == Leader {
 		rf.log("append:%+v", LogEntry{Cmd: command, Term: rf.term})
-		rf.logs = append(rf.logs, LogEntry{Cmd: command, Term: rf.term})
+		rf.logs2 = append(rf.logs2, LogEntry{Cmd: command, Term: rf.term, Index: rf.lastIndex() + 1})
 		term = rf.term
 		rf.persist()
-		index = len(rf.logs)
+		index = rf.lastIndex() + 1
 
 	}
 	return index, term, isLeader
@@ -649,7 +685,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
-	rf.log("crash,save logs%+v", rf.logs)
+	rf.log("crash,save logs%+v", rf.logs2)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	//rf.mainSpan.Finish()
@@ -688,12 +724,12 @@ func (rf *Raft) log(str string, args ...interface{}) {
 
 func (rf *Raft) last10Log() []LogEntry {
 	var tmp []LogEntry
-	if len(rf.logs) > 6 {
-		tmp = append(tmp, rf.logs[:2]...)
+	if len(rf.logs2) > 6 {
+		tmp = append(tmp, rf.logs2[:2]...)
 		tmp = append(tmp, LogEntry{Cmd: 12312312345, Term: -1})
-		tmp = append(tmp, rf.logs[len(rf.logs)-5:]...)
+		tmp = append(tmp, rf.logs2[len(rf.logs2)-5:]...)
 	} else {
-		return rf.logs
+		return rf.logs2
 	}
 	return tmp
 }
@@ -729,13 +765,13 @@ func (rf *Raft) applyLoop() {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				rf.applyChan <- ApplyMsg{
 					CommandValid: true,
-					Command:      rf.logs[i].Cmd,
+					Command:      rf.indexLog(i).Cmd,
 					CommandIndex: i + 1,
 				}
 				rf.log(
 					"apply log%+v", ApplyMsg{
 						CommandValid: true,
-						Command:      rf.logs[i].Cmd,
+						Command:      rf.indexLog(i).Cmd,
 						CommandIndex: i + 1,
 					},
 				)
@@ -776,6 +812,8 @@ func Make(
 	rf.applyChan = applyCh
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	rf.lastIncludeLogIndex = -1
+	rf.lastIncludeTerm = -1
 	rf.commitIndex = -1
 	rf.lastApplied = -1
 	// initialize from state persisted before a crash
