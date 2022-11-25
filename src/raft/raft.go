@@ -262,9 +262,20 @@ func (rf *Raft) sendHeartBeat() {
 				}
 				var entries []LogEntry
 				preLog := LogEntry{Term: -1}
-
+				if rf.nextIndex[i]-1 >= rf.lastIncludeTerm && rf.lastIncludeTerm != -1 {
+					go func(server int) {
+						installArgs := InstallSnapshotArgs{
+							Term:             rf.term,
+							LastIncludeTerm:  rf.lastIncludeTerm,
+							LastIncludeIndex: rf.lastIncludeLogIndex,
+							SnapShot:         rf.persister.ReadSnapshot(),
+						}
+						installReply := InstallSnapshotReply{}
+						rf.sendInstallSnapshot(server, &installArgs, &installReply)
+					}(i)
+				}
 				if rf.nextIndex[i] <= rf.lastIndex() {
-					entries = rf.rangeLog(max(rf.nextIndex[i], 0), -1)
+					entries = rf.rangeLog(rf.nextIndex[i], -1)
 				}
 				if rf.nextIndex[i] >= 1 {
 					preLog = rf.indexLog(rf.nextIndex[i] - 1)
@@ -353,7 +364,9 @@ func (rf *Raft) persist() {
 func (rf *Raft) getState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(rf.logs2) != nil || e.Encode(rf.voteFor) != nil || e.Encode(rf.term) != nil {
+	if e.Encode(rf.lastIncludeTerm) != nil || e.Encode(rf.lastIncludeLogIndex) != nil || e.Encode(rf.logs2) != nil || e.Encode(
+		rf.voteFor,
+	) != nil || e.Encode(rf.term) != nil {
 		log.Fatal("encode Error")
 	}
 	return w.Bytes()
@@ -373,6 +386,14 @@ func (rf *Raft) readPersist(data []byte) {
 	term := 0
 	voteFor := 0
 	logs := []LogEntry{}
+	lastIncludeLogIndex := -1
+	lastIncludeLogTerm := -1
+	if err := d.Decode(&lastIncludeLogTerm); err != nil {
+		log.Fatalf("readPersist Error,%+v", err)
+	}
+	if err := d.Decode(&lastIncludeLogIndex); err != nil {
+		log.Fatalf("readPersist Error,%+v", err)
+	}
 	if err := d.Decode(&logs); err != nil {
 		log.Fatalf("readPersist Error,%+v", err)
 	}
@@ -385,6 +406,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.term = term
 	rf.voteFor = voteFor
 	rf.logs2 = logs
+	rf.lastIncludeLogIndex = lastIncludeLogIndex
+	rf.lastIncludeTerm = lastIncludeLogTerm
 	rf.log("readPersist %+v", rf.logs2)
 }
 
@@ -407,10 +430,15 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.lastIncludeLogIndex = index
+	defer rf.log("snapshot index%v", index)
+	if rf.commitIndex < index {
+		return
+	}
 	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
-	//rf.persister.SaveRaftState()
-
+	rf.lastIncludeTerm = rf.indexLog(index).Term
+	rf.lastIncludeLogIndex = index
+	rf.logs2 = rf.logs2[index+1:]
+	//rf.commitIndex = index
 }
 
 //
@@ -587,6 +615,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 }
 
+type InstallSnapshotArgs struct {
+	Term             int
+	LastIncludeIndex int
+	LastIncludeTerm  int
+	SnapShot         []byte
+}
+
+type InstallSnapshotReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.term
+	if args.Term < rf.term {
+		reply.Success = false
+		return
+	}
+	if args.Term > rf.term {
+		rf.becomeFollower(args.Term)
+	}
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.SnapShot,
+		SnapshotIndex: args.LastIncludeIndex,
+		SnapshotTerm:  args.LastIncludeTerm,
+	}
+	rf.log(
+		"apply Snap%v,", ApplyMsg{
+			SnapshotValid: true,
+			//Snapshot:      args.SnapShot,
+			SnapshotIndex: args.LastIncludeIndex,
+			SnapshotTerm:  args.LastIncludeTerm,
+		},
+	)
+	rf.applyChan <- applyMsg
+	rf.commitIndex = args.LastIncludeIndex
+	rf.lastApplied = args.LastIncludeIndex
+	reply.Success = true
+}
+
 //!!! 写错了
 func min(a, b int) int {
 	if a < b {
@@ -637,6 +708,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 
@@ -709,11 +785,12 @@ func (rf *Raft) logTrac(str string, args ...interface{}) {
 
 }
 func (rf *Raft) log(str string, args ...interface{}) {
-
 	log.Printf(
 		"%s,%+v\n", fmt.Sprintf(
 			fmt.Sprintf(
-				"raft(id:%v,term:%v,state:%v,votefor:%v)##: %v", rf.tracerName, rf.term, rf.state, rf.voteFor,
+				"raft(id:%v,term:%v,state:%v,votefor:%v,lastIndex%v,commitIndex:%v,lastApplied%v)##: %v", rf.me,
+				rf.term, rf.state,
+				rf.voteFor, rf.lastIncludeLogIndex, rf.commitIndex, rf.lastApplied,
 				str,
 			),
 			args...,
@@ -756,20 +833,22 @@ func (rf *Raft) ticker() {
 		}
 	}
 }
-
 func (rf *Raft) applyLoop() {
-	for {
+	for !rf.killed() {
 		time.Sleep(time.Duration(10) * time.Millisecond)
 		rf.mu.Lock()
+		var msgs []ApplyMsg
 		if rf.lastApplied < rf.commitIndex {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-				rf.applyChan <- ApplyMsg{
-					CommandValid: true,
-					Command:      rf.indexLog(i).Cmd,
-					CommandIndex: i + 1,
-				}
+				msgs = append(
+					msgs, ApplyMsg{
+						CommandValid: true,
+						Command:      rf.indexLog(i).Cmd,
+						CommandIndex: i + 1,
+					},
+				)
 				rf.log(
-					"apply log%+v", ApplyMsg{
+					"addMsg log%+v", ApplyMsg{
 						CommandValid: true,
 						Command:      rf.indexLog(i).Cmd,
 						CommandIndex: i + 1,
@@ -777,9 +856,14 @@ func (rf *Raft) applyLoop() {
 				)
 			}
 		}
-
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
+		for i, _ := range msgs {
+			rf.applyChan <- msgs[i]
+			rf.log(
+				"apply log%+v", msgs[i],
+			)
+		}
 	}
 }
 
