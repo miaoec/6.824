@@ -295,7 +295,10 @@ func (rf *Raft) sendHeartBeat() {
 								rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
 								rf.updateCommitIndex()
 							} else {
-								rf.log("faild sendInstallSnapshot to%v", server)
+								//这里需要处理失败的情况，follower已经同步了快照，将nextIndex重置为rf.lastIndex+1,
+								//todo:也许rf.nextIndex[server]++更合适？
+								rf.log("reply,faild sendInstallSnapshot to%v", server)
+								rf.nextIndex[server] = rf.lastIndex() + 1
 								//rf.nextIndex[server] = max(reply.ConflictIndex, 0)
 								//if rf.nextIndex[server] >= 1 {
 								//	rf.nextIndex[server]--
@@ -304,7 +307,6 @@ func (rf *Raft) sendHeartBeat() {
 						} else {
 							rf.log("faild sendInstallSnapshot to%v", server)
 						}
-
 					}(i)
 					rf.nextIndex[i]++
 					continue
@@ -644,13 +646,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//	reply.ConflictIndex = rf.
 	//	return
 	//}
-	//raft(id:1,term:26,state:Follower,votefor:0,lastIndex138,commitIndex:150,lastApplied150)##:
-	//heartBeatRecv req:{Context:[] Term:26 Id:0 Entries:[{Cmd:2241140163398844214 Index:152 Term:24}
-	//{Cmd:3883297315187992938 Index:153 Term:24} {Cmd:0 Index:154 Term:26}] PreLogIndex:151 PreLogTerm:24 CommitIndex:153},
-	//rsp:&{Term:26 Success:false ConflictIndex:0 ConflictTerm:0 Msg:preLog term conflict },
-	//[{Cmd:3255884213086623268 Index:139 Term:21} {Cmd:225906178511598908 Index:140 Term:21} {Cmd:6896266263582394651 Index:141 Term:21} {Cmd:4103837096559706530 Index:142 Term:21} {Cmd:8937588538276435855 Index:143 Term:21} {Cmd:1776474077522323209 Index:144 Term:21} {Cmd:8277767350306055960 Index:145 Term:21} {Cmd:1811632068841303828 Index:146 Term:21} {Cmd:247371431357017918 Index:147 Term:21} {Cmd:6355660425554388706 Index:148 Term:21} {Cmd:9081955926462265026 Index:149 Term:21} {Cmd:0 Index:150 Term:23} {Cmd:6496807196760029286 Index:151 Term:23}]
-
-	if args.PreLogIndex > rf.lastIndex() {
+	if args.PreLogIndex < rf.lastIncludeEntry.Index || args.PreLogIndex > rf.lastIndex() {
 		reply.Success = false
 		reply.Msg = AppendEntriesPreLogTConflict
 		reply.ConflictIndex = rf.lastIndex() + 1
@@ -917,6 +913,7 @@ func (rf *Raft) ticker() {
 			}
 			if rf.killed() == false {
 				rf.log(" electionTimeout startElection")
+				//这里务必要重置时间，可能恰好大家时间都差不多，每个节点一直投自己，陷入选举死循环，实测两个节点概率超过百分之2，与随机函数相关
 				rf.electionTime.Reset(rf.newRandTimeOut())
 				rf.startElection(ctx)
 				rf.mu.Unlock()
