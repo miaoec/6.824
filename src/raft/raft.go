@@ -295,7 +295,7 @@ func (rf *Raft) sendHeartBeat() {
 								rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
 								rf.updateCommitIndex()
 							} else {
-								//这里需要处理失败的情况，follower已经同步了快照，将nextIndex重置为rf.lastIndex+1,
+								//这里需要处理失败的情况，follower已经同步了快照，将nextIndex重置为rf.lastIndex+1,否则会出现一直不失败的情况
 								//todo:也许rf.nextIndex[server]++更合适？
 								rf.log("reply,faild sendInstallSnapshot to%v", server)
 								rf.nextIndex[server] = rf.lastIndex() + 1
