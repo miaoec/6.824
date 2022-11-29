@@ -117,6 +117,8 @@ type Raft struct {
 	tracerName string
 }
 
+const IsDebug = false
+
 func (rf *Raft) indexLog(index int) LogEntry {
 	if index < rf.lastIncludeEntry.Index {
 		panic("index(" + strconv.Itoa(index) + ")<rf.lastIncludeEntry.Index")
@@ -189,7 +191,7 @@ func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 	//noop log
 	//加上nooop log 会导致TestBasicAgree2B与TestRPCBytes2B 错误
-	rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term, Index: rf.lastIndex() + 1})
+	//rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term, Index: rf.lastIndex() + 1})
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = rf.lastIndex() + 1
 		rf.matchIndex[i] = -1
@@ -873,18 +875,21 @@ func (rf *Raft) End() {
 func (rf *Raft) logTrac(str string, args ...interface{}) {
 
 }
+
 func (rf *Raft) log(str string, args ...interface{}) {
-	log.Printf(
-		"%s,%+v\n", fmt.Sprintf(
-			fmt.Sprintf(
-				"raft(id:%v,term:%v,state:%v,votefor:%v,lastIndex%v,commitIndex:%v,lastApplied%v)##: %v", rf.me,
-				rf.term, rf.state,
-				rf.voteFor, rf.lastIncludeEntry.Index, rf.commitIndex, rf.lastApplied,
-				str,
-			),
-			args...,
-		), rf.logs2,
-	)
+	if IsDebug {
+		log.Printf(
+			"%s,%+v\n", fmt.Sprintf(
+				fmt.Sprintf(
+					"raft(id:%v,term:%v,state:%v,votefor:%v,lastIndex%v,commitIndex:%v,lastApplied%v)##: %v", rf.me,
+					rf.term, rf.state,
+					rf.voteFor, rf.lastIncludeEntry.Index, rf.commitIndex, rf.lastApplied,
+					str,
+				),
+				args...,
+			), rf.logs2,
+		)
+	}
 
 }
 
@@ -974,7 +979,7 @@ func Make(
 	peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg,
 ) *Raft {
-	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
+	//log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
 	//f, err := os.OpenFile("batch_test_tmp/raft-"+strconv.Itoa(me)+".log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
 	//log.SetOutput(f)
 	//if err != nil {
@@ -1007,6 +1012,7 @@ func Make(
 	//rf.mainSpan.SetTag("pGroup", strconv.Itoa(os.Getppid()))
 	//ctx := opentracing.ContextWithSpan(context.Background(), rf.mainSpan)
 	//tracer.StartSpan("s")
+
 	go rf.ticker()
 	go rf.sendHeartBeat()
 	go rf.applyLoop()
