@@ -259,6 +259,7 @@ func (rf *Raft) sendHeartBeat() {
 		//	不能够协程去调用，可能会导致出现Follower发心跳
 		func() {
 			defer rf.mu.Unlock()
+			//defer rf.persist()
 			rf.matchIndex[rf.me] = rf.lastIndex()
 			for i, _ := range rf.peers {
 				if i == rf.me {
@@ -447,6 +448,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.logs2 = logs
 	rf.lastIncludeEntry.Index = lastIncludeIndex
 	rf.lastIncludeEntry.Term = lastIncludeLogTerm
+	rf.commitIndex = rf.lastIncludeEntry.Index
+	rf.lastApplied = rf.lastIncludeEntry.Index //读完状态后lastApplied初始化为lastIncludeIndex
 	rf.log("readPersist %+v", rf.logs2)
 }
 
@@ -498,10 +501,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if rf.lastIncludeEntry.Index >= index {
 		return
 	}
-	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
 	rf.lastIncludeEntry.Term = rf.indexLog(index).Term
 	rf.logs2 = rf.logs2[index-rf.lastIncludeEntry.Index:]
 	rf.lastIncludeEntry.Index = index
+	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
 	//rf.commitIndex = index
 }
 
