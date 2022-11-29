@@ -1,19 +1,19 @@
 rm -rf batch_test_tmp
 mkdir batch_test_tmp
 
-function dotest() {
-  go test -run TestFigure8Unreliable2C >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
+function doTest() {
+  go test -run TestSnapshotInstallUnCrash2D  >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
 }
 
-export -f dotest
+export -f doTest
 
 for ((i = 0; i < $1; i++)); do
   echo "start Test "$i"/"$1
   for ((j = 0; j < $2; j++)); do
-    sh -c "dotest "$i" "$j &
+    sh -c "doTest "$i" "$j &
   done
   wait
-  echo "end Test "$i"/"$1
+  echo "end Test "$i"/"$1e
   grep -rn "FAIL" -B 2 batch_test_tmp/* >../failed.log
   echo "Fail Count:"$(grep -o "FAIL" batch_test_tmp/* | wc -l)"/"$j
 done
