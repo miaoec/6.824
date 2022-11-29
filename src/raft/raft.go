@@ -188,6 +188,7 @@ func (rf *Raft) becomeLeader() {
 	rf.log("%v,becomeLeader", l)
 	rf.state = Leader
 	//noop log
+	//加上nooop log 会导致TestBasicAgree2B与TestRPCBytes2B 错误
 	rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term, Index: rf.lastIndex() + 1})
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = rf.lastIndex() + 1
@@ -366,8 +367,7 @@ func (rf *Raft) sendHeartBeat() {
 //leader 不能够主动提交之前任期的日志
 func (rf *Raft) updateCommitIndex() {
 	idx := rf.getMajorityMatchIndex()
-	//&& rf.indexLog(idx).Term == rf.term
-	if idx >= 0 {
+	if idx >= 0 && rf.indexLog(idx).Term == rf.term {
 		rf.commitIndex = idx
 	}
 }
@@ -975,6 +975,11 @@ func Make(
 	persister *Persister, applyCh chan ApplyMsg,
 ) *Raft {
 	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
+	//f, err := os.OpenFile("batch_test_tmp/raft-"+strconv.Itoa(me)+".log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	//log.SetOutput(f)
+	//if err != nil {
+	//	panic(err)
+	//}
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
