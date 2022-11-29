@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -374,7 +377,7 @@ func TestConcurrentStarts2B(t *testing.T) {
 loop:
 	for try := 0; try < 5; try++ {
 		if try > 0 {
-			// give solution some time to settle
+			// give solution3 some time to settle
 			time.Sleep(3 * time.Second)
 		}
 
@@ -601,7 +604,7 @@ func TestCount2B(t *testing.T) {
 loop:
 	for try := 0; try < 5; try++ {
 		if try > 0 {
-			// give solution some time to settle
+			// give solution3 some time to settle
 			time.Sleep(3 * time.Second)
 		}
 
@@ -817,10 +820,11 @@ func TestPersist32C(t *testing.T) {
 // haven't been committed yet.
 //
 func TestFigure82C(t *testing.T) {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
-
+	//fmt.Printf("t")
 	cfg.begin("Test (2C): Figure 8")
 
 	cfg.one(rand.Int(), 1, true)
@@ -830,31 +834,41 @@ func TestFigure82C(t *testing.T) {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(rand.Int())
+				n := rand.Int()
+				_, _, ok := cfg.rafts[i].Start(n)
+
 				if ok {
+					log.Printf("try start%+v,is ok,leader is%+v", n, i)
 					leader = i
 				}
+				log.Printf("try start%+v,not ok", n)
+
 			}
 		}
 
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			log.Printf("long sleep %+v", ms)
 		} else {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			log.Printf("sleep %+vms", ms)
 		}
 
 		if leader != -1 {
 			cfg.crash1(leader)
+			log.Printf("crash1 %+vms", leader)
 			nup -= 1
 		}
 
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
+
 				cfg.start1(s, cfg.applier)
 				cfg.connect(s)
+				log.Printf("start1 and connect %+v", leader)
 				nup += 1
 			}
 		}
@@ -911,14 +925,16 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, 1, true)
 
 	nup := servers
-	for iters := 0; iters < 1000; iters++ {
+	for iters := 0; iters < 2000; iters++ {
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
 		leader := -1
 		for i := 0; i < servers; i++ {
-			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
+			n := rand.Int() % 10000
+			_, _, ok := cfg.rafts[i].Start(n)
 			if ok && cfg.connected[i] {
+				log.Printf("try start%+v,is ok,leader is%+v", n, i)
 				leader = i
 			}
 		}
@@ -926,13 +942,16 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			log.Printf("long sleep %+vms", ms)
 		} else {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
+			log.Printf("sleep %+vms", ms)
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
+			log.Printf("disconnect %+v", leader)
 			nup -= 1
 		}
 
@@ -940,9 +959,11 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
+				log.Printf("connect %+v", s)
 				nup += 1
 			}
 		}
+
 	}
 
 	for i := 0; i < servers; i++ {
@@ -950,8 +971,9 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
-	cfg.one(rand.Int()%10000, servers, true)
+	n := rand.Int() % 10000
+	log.Printf("try none %v", n)
+	cfg.one(n, servers, true)
 
 	cfg.end()
 }
@@ -1184,8 +1206,10 @@ func TestSnapshotInstall2D(t *testing.T) {
 }
 
 func TestSnapshotInstallUnreliable2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
-		true, false, false)
+	snapcommon(
+		t, "Test (2D): install snapshots (disconnect+unreliable)",
+		true, false, false,
+	)
 }
 
 func TestSnapshotInstallCrash2D(t *testing.T) {
@@ -1237,4 +1261,9 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 		}
 	}
 	cfg.end()
+}
+
+func TestName(t *testing.T) {
+	a := []int{1, 2, 3}
+	t.Log(a[:0])
 }

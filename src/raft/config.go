@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
+import (
+	"6.824/labgob"
+)
 import "6.824/labrpc"
 import "bytes"
 import "log"
@@ -63,12 +65,14 @@ type config struct {
 var ncpu_once sync.Once
 
 func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
-	ncpu_once.Do(func() {
-		if runtime.NumCPU() < 2 {
-			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
-		}
-		rand.Seed(makeSeed())
-	})
+	ncpu_once.Do(
+		func() {
+			if runtime.NumCPU() < 2 {
+				fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
+			}
+			rand.Seed(makeSeed())
+		},
+	)
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
@@ -144,8 +148,10 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
-			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
-				m.CommandIndex, i, m.Command, j, old)
+			err_msg = fmt.Sprintf(
+				"commit index=%v server=%v %v != server=%v %v",
+				m.CommandIndex, i, m.Command, j, old,
+			)
 		}
 	}
 	_, prevok := cfg.logs[i][m.CommandIndex-1]
@@ -227,7 +233,9 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			}
 		} else if m.CommandValid {
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
-				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
+				err_msg = fmt.Sprintf(
+					"server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex,
+				)
 			}
 
 			if err_msg == "" {
@@ -507,8 +515,10 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		if ok {
 			if count > 0 && cmd != cmd1 {
-				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
-					index, cmd, cmd1)
+				cfg.t.Fatalf(
+					"committed values do not match: index %v, %v, %v",
+					index, cmd, cmd1,
+				)
 			}
 			count += 1
 			cmd = cmd1
@@ -542,8 +552,10 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	}
 	nd, cmd := cfg.nCommitted(index)
 	if nd < n {
-		cfg.t.Fatalf("only %d decided for index %d; wanted %d",
-			nd, index, n)
+		cfg.t.Fatalf(
+			"only %d decided for index %d; wanted %d",
+			nd, index, n,
+		)
 	}
 	return cmd
 }
@@ -563,6 +575,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
+	log.Printf("try one %+v", cmd)
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -629,6 +642,9 @@ func (cfg *config) begin(description string) {
 // and some performance numbers.
 func (cfg *config) end() {
 	cfg.checkTimeout()
+	for _, r := range cfg.rafts {
+		r.End()
+	}
 	if cfg.t.Failed() == false {
 		cfg.mu.Lock()
 		t := time.Since(cfg.t0).Seconds()       // real time
