@@ -248,122 +248,126 @@ func (rf *Raft) startElection(ctx context.Context) {
 func (rf *Raft) sendHeartBeat() {
 	for {
 		time.Sleep(time.Duration(100) * time.Millisecond)
-		rf.mu.Lock()
 		if rf.killed() {
-			rf.mu.Unlock()
 			return
 		}
+		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
 			continue
 		}
-
+		rf.mu.Unlock()
+		rf.sendOne()
 		//opentracing
 		//	不能够协程去调用，可能会导致出现Follower发心跳
-		func() {
-			defer rf.mu.Unlock()
-			//defer rf.persist()
-			rf.matchIndex[rf.me] = rf.lastIndex()
-			for i, _ := range rf.peers {
-				if i == rf.me {
-					rf.updateCommitIndex()
-					continue
-				}
-				var entries []LogEntry
-				preLog := LogEntry{Term: -1}
-				if rf.nextIndex[i]-1 < rf.lastIncludeEntry.Index && rf.lastIncludeEntry.Term != -1 {
-					go func(server int) {
-						installArgs := InstallSnapshotArgs{
-							Term:             rf.term,
-							LastIncludeTerm:  rf.lastIncludeEntry.Term,
-							LastIncludeIndex: rf.lastIncludeEntry.Index,
-							SnapShot:         rf.persister.ReadSnapshot(),
-						}
-						reply := InstallSnapshotReply{}
-						rf.log(
-							"send InstallSnapshot(%+v): installArgs:%+v", i, installArgs.logData(),
-						)
-						if rf.sendInstallSnapshot(server, &installArgs, &reply) {
-							rf.mu.Lock()
-							defer rf.mu.Unlock()
-							//要判断leader
-							if reply.Term > rf.term {
-								rf.becomeFollower(reply.Term)
-								return
-							}
-							if rf.state != Leader {
-								return
-							}
-							if reply.Success {
-								rf.matchIndex[server] = installArgs.LastIncludeIndex
-								rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
-								rf.updateCommitIndex()
-							} else {
-								//这里需要处理失败的情况，follower已经同步了快照，将nextIndex重置为rf.lastIndex+1,否则会出现一直不失败的情况
-								//todo:也许rf.nextIndex[server]++更合适？
-								rf.log("reply,faild sendInstallSnapshot to%v", server)
-								rf.nextIndex[server] = rf.lastIndex() + 1
-								//rf.nextIndex[server] = max(reply.ConflictIndex, 0)
-								//if rf.nextIndex[server] >= 1 {
-								//	rf.nextIndex[server]--
-								//}
-							}
-						} else {
-							rf.log("faild sendInstallSnapshot to%v", server)
-						}
-					}(i)
-					rf.nextIndex[i]++
-					continue
-				}
-				if rf.nextIndex[i] <= rf.lastIndex() {
-					entries = rf.rangeLog(rf.nextIndex[i], -1)
-				}
-				if rf.nextIndex[i] >= 1 {
-					preLog = rf.indexLog(rf.nextIndex[i] - 1)
-				}
-				rf.log("send entries(%v): nextIndex:%v,matchIndex:%v", i, rf.nextIndex[i], rf.matchIndex[i])
-				args := &AppendEntriesArgs{
-					Term:        rf.term,
-					Id:          rf.me,
-					CommitIndex: rf.commitIndex,
-					PreLogIndex: rf.nextIndex[i] - 1,
-					PreLogTerm:  preLog.Term,
-					Entries:     entries,
-					Context:     nil,
-				}
-				reply := &AppendEntriesReply{}
-				go func(server int) {
-					ok := rf.sendAppendEntries(server, args, reply)
-					if ok {
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						//要判断leader
 
-						if reply.Term > rf.term {
-							rf.becomeFollower(reply.Term)
-							return
-						}
-						if rf.state != Leader {
-							return
-						}
-						if reply.Success {
-							rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
-							rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
-							rf.updateCommitIndex()
-						} else {
-							rf.nextIndex[server] = max(reply.ConflictIndex, 0)
-							//if rf.nextIndex[server] >= 1 {
-							//	rf.nextIndex[server]--
-							//}
-						}
-					} else {
-						rf.log("faild send entries to%v", server)
-					}
-
-				}(i)
-			}
-		}()
 	}
+}
+
+func (rf *Raft) sendOne() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//defer rf.persist()
+	rf.matchIndex[rf.me] = rf.lastIndex()
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			rf.updateCommitIndex()
+			continue
+		}
+		var entries []LogEntry
+		preLog := LogEntry{Term: -1}
+		if rf.nextIndex[i]-1 < rf.lastIncludeEntry.Index && rf.lastIncludeEntry.Term != -1 {
+			go func(server int) {
+				installArgs := InstallSnapshotArgs{
+					Term:             rf.term,
+					LastIncludeTerm:  rf.lastIncludeEntry.Term,
+					LastIncludeIndex: rf.lastIncludeEntry.Index,
+					SnapShot:         rf.persister.ReadSnapshot(),
+				}
+				reply := InstallSnapshotReply{}
+				rf.log(
+					"send InstallSnapshot(%+v): installArgs:%+v", i, installArgs.logData(),
+				)
+				if rf.sendInstallSnapshot(server, &installArgs, &reply) {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					//要判断leader
+					if reply.Term > rf.term {
+						rf.becomeFollower(reply.Term)
+						return
+					}
+					if rf.state != Leader {
+						return
+					}
+					if reply.Success {
+						rf.matchIndex[server] = installArgs.LastIncludeIndex
+						rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
+						rf.updateCommitIndex()
+					} else {
+						//这里需要处理失败的情况，follower已经同步了快照，将nextIndex重置为rf.lastIndex+1,否则会出现一直不失败的情况
+						//todo:也许rf.nextIndex[server]++更合适？
+						rf.log("reply,faild sendInstallSnapshot to%v", server)
+						rf.nextIndex[server] = rf.lastIndex() + 1
+						//rf.nextIndex[server] = max(reply.ConflictIndex, 0)
+						//if rf.nextIndex[server] >= 1 {
+						//	rf.nextIndex[server]--
+						//}
+					}
+				} else {
+					rf.log("faild sendInstallSnapshot to%v", server)
+				}
+			}(i)
+			rf.nextIndex[i]++
+			continue
+		}
+		if rf.nextIndex[i] <= rf.lastIndex() {
+			entries = rf.rangeLog(rf.nextIndex[i], -1)
+		}
+		if rf.nextIndex[i] >= 1 {
+			preLog = rf.indexLog(rf.nextIndex[i] - 1)
+		}
+		rf.log("send entries(%v): nextIndex:%v,matchIndex:%v", i, rf.nextIndex[i], rf.matchIndex[i])
+		args := &AppendEntriesArgs{
+			Term:        rf.term,
+			Id:          rf.me,
+			CommitIndex: rf.commitIndex,
+			PreLogIndex: rf.nextIndex[i] - 1,
+			PreLogTerm:  preLog.Term,
+			Entries:     entries,
+			Context:     nil,
+		}
+		reply := &AppendEntriesReply{}
+		go func(server int) {
+			ok := rf.sendAppendEntries(server, args, reply)
+			if ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				//要判断leader
+
+				if reply.Term > rf.term {
+					rf.becomeFollower(reply.Term)
+					return
+				}
+				if rf.state != Leader {
+					return
+				}
+				if reply.Success {
+					rf.matchIndex[server] = args.PreLogIndex + len(args.Entries)
+					rf.nextIndex[server] = min(rf.matchIndex[server]+1, rf.lastIndex()+1)
+					rf.updateCommitIndex()
+				} else {
+					rf.nextIndex[server] = max(reply.ConflictIndex, 0)
+					//if rf.nextIndex[server] >= 1 {
+					//	rf.nextIndex[server]--
+					//}
+				}
+			} else {
+				rf.log("faild send entries to%v", server)
+			}
+
+		}(i)
+	}
+
 }
 
 //leader 不能够主动提交之前任期的日志
@@ -835,7 +839,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.term
 		rf.persist()
 		index = rf.lastIndex() + 1
-
+		go rf.sendOne()
 	}
 	return index, term, isLeader
 }
