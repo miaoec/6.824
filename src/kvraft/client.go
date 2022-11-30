@@ -16,7 +16,7 @@ type Clerk struct {
 	cmds     []interface{}
 }
 
-const isDebug = false
+const isDebug = true
 
 func (ck *Clerk) log(str string, args ...interface{}) {
 	if isDebug {

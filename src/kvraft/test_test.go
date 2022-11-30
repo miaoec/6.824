@@ -46,17 +46,20 @@ var t0 = time.Now()
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	start := int64(time.Since(t0))
+	fmt.Printf("tget:%v\n", key)
 	v := ck.Get(key)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
-		log.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 0, Key: key},
-			Output:   models.KvOutput{Value: v},
-			Call:     start,
-			Return:   end,
-			ClientId: cli,
-		})
+		log.Append(
+			porcupine.Operation{
+				Input:    models.KvInput{Op: 0, Key: key},
+				Output:   models.KvOutput{Value: v},
+				Call:     start,
+				Return:   end,
+				ClientId: cli,
+			},
+		)
 	}
 
 	return v
@@ -64,33 +67,39 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 
 func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
+	fmt.Printf("tput:%v,%v\n", key, value)
 	ck.Put(key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
-		log.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 1, Key: key, Value: value},
-			Output:   models.KvOutput{},
-			Call:     start,
-			Return:   end,
-			ClientId: cli,
-		})
+		log.Append(
+			porcupine.Operation{
+				Input:    models.KvInput{Op: 1, Key: key, Value: value},
+				Output:   models.KvOutput{},
+				Call:     start,
+				Return:   end,
+				ClientId: cli,
+			},
+		)
 	}
 }
 
 func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
+	fmt.Printf("tappend:%v,%v\n", key, value)
 	ck.Append(key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
 	if log != nil {
-		log.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 2, Key: key, Value: value},
-			Output:   models.KvOutput{},
-			Call:     start,
-			Return:   end,
-			ClientId: cli,
-		})
+		log.Append(
+			porcupine.Operation{
+				Input:    models.KvInput{Op: 2, Key: key, Value: value},
+				Output:   models.KvOutput{},
+				Call:     start,
+				Return:   end,
+				ClientId: cli,
+			},
+		)
 	}
 }
 
@@ -209,7 +218,10 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 // maxraftstate is a positive number, the size of the state for Raft (i.e., log
 // size) shouldn't exceed 8*maxraftstate. If maxraftstate is negative,
 // snapshots shouldn't be used.
-func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliable bool, crash bool, partitions bool, maxraftstate int, randomkeys bool) {
+func GenericTest(
+	t *testing.T, part string, nclients int, nservers int, unreliable bool, crash bool, partitions bool,
+	maxraftstate int, randomkeys bool,
+) {
 
 	title := "Test: "
 	if unreliable {
@@ -256,45 +268,47 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
-		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
-			j := 0
-			defer func() {
-				clnts[cli] <- j
-			}()
-			last := "" // only used when not randomkeys
-			if !randomkeys {
-				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
-			}
-			for atomic.LoadInt32(&done_clients) == 0 {
-				var key string
-				if randomkeys {
-					key = strconv.Itoa(rand.Intn(nclients))
-				} else {
-					key = strconv.Itoa(cli)
+		go spawn_clients_and_wait(
+			t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
+				j := 0
+				defer func() {
+					clnts[cli] <- j
+				}()
+				last := "" // only used when not randomkeys
+				if !randomkeys {
+					Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
 				}
-				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-				if (rand.Int() % 1000) < 500 {
-					// log.Printf("%d: client new append %v\n", cli, nv)
-					Append(cfg, myck, key, nv, opLog, cli)
-					if !randomkeys {
-						last = NextValue(last, nv)
+				for atomic.LoadInt32(&done_clients) == 0 {
+					var key string
+					if randomkeys {
+						key = strconv.Itoa(rand.Intn(nclients))
+					} else {
+						key = strconv.Itoa(cli)
 					}
-					j++
-				} else if randomkeys && (rand.Int()%1000) < 100 {
-					// we only do this when using random keys, because it would break the
-					// check done after Get() operations
-					Put(cfg, myck, key, nv, opLog, cli)
-					j++
-				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
-					v := Get(cfg, myck, key, opLog, cli)
-					// the following check only makes sense when we're not using random keys
-					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
+					if (rand.Int() % 1000) < 500 {
+						// log.Printf("%d: client new append %v\n", cli, nv)
+						Append(cfg, myck, key, nv, opLog, cli)
+						if !randomkeys {
+							last = NextValue(last, nv)
+						}
+						j++
+					} else if randomkeys && (rand.Int()%1000) < 100 {
+						// we only do this when using random keys, because it would break the
+						// check done after Get() operations
+						Put(cfg, myck, key, nv, opLog, cli)
+						j++
+					} else {
+						// log.Printf("%d: client new get %v\n", cli, key)
+						v := Get(cfg, myck, key, opLog, cli)
+						// the following check only makes sense when we're not using random keys
+						if !randomkeys && v != last {
+							t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						}
 					}
 				}
-			}
-		})
+			},
+		)
 
 		if partitions {
 			// Allow the clients to perform some operations without interruption
@@ -418,7 +432,7 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 	if dur > numOps*timePerOp {
 		t.Fatalf("Operations completed too slowly %v/op > %v/op\n", dur/numOps, timePerOp)
 	}
-
+	t.Logf("Operations completed too slowly %v/op < %v/op\n", dur/numOps, timePerOp)
 	cfg.end()
 }
 
@@ -454,13 +468,15 @@ func TestUnreliableOneKey3A(t *testing.T) {
 
 	const nclient = 5
 	const upto = 10
-	spawn_clients_and_wait(t, cfg, nclient, func(me int, myck *Clerk, t *testing.T) {
-		n := 0
-		for n < upto {
-			Append(cfg, myck, "k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y", nil, -1)
-			n++
-		}
-	})
+	spawn_clients_and_wait(
+		t, cfg, nclient, func(me int, myck *Clerk, t *testing.T) {
+			n := 0
+			for n < upto {
+				Append(cfg, myck, "k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y", nil, -1)
+				n++
+			}
+		},
+	)
 
 	var counts []int
 	for i := 0; i < nclient; i++ {

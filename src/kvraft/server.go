@@ -10,10 +10,9 @@ import (
 	"sync/atomic"
 )
 
-const Debug = false
+const Debug = true
 
 func (kv *KVServer) log(str string, args ...interface{}) {
-	//_, isLeader := kv.rf.GetState()
 	if isDebug {
 		log.Printf(
 			"%v,%+v",
@@ -47,6 +46,11 @@ type Op struct {
 	// otherwise RPC will break.
 }
 
+type opMap struct {
+	m map[string]chan opMsg
+	sync.RWMutex
+}
+
 type KVServer struct {
 	mu            sync.Mutex
 	me            int
@@ -55,8 +59,8 @@ type KVServer struct {
 	dead          int32 // set by Kill()
 	maxraftstate  int   // snapshot if log grows this big
 	data          map[string]string
-	opStatus      map[string]chan opMsg
-	opIndexStatus map[string]chan opMsg
+	opStatus      sync.Map
+	opIndexStatus sync.Map
 	lastIndex     int64
 	// Your definitions here.
 }
@@ -73,8 +77,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	if isLeader {
 		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
+		v, _ := kv.opStatus.Load(op.RequestID)
 		select {
-		case <-kv.opStatus[op.RequestID]:
+		case <-v.(chan opMsg):
 			kv.mu.Lock()
 			kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
 			if v, ok := kv.data[args.Key]; ok {
@@ -112,11 +117,12 @@ func (kv *KVServer) applier() {
 				}
 			}
 			kv.lastIndex = int64(ch.CommandIndex)
-			_, ok = kv.opStatus[op.RequestID]
+			v, ok := kv.opStatus.Load(op.RequestID)
 			kv.mu.Unlock()
+			// = kv.opStatus.m[op.RequestID]
 			if ok {
 				go func() {
-					kv.opStatus[op.RequestID] <- opMsg{}
+					close(v.(chan opMsg))
 					kv.log("applier success!!,%+v,index opt found in opStatus", ch)
 				}()
 			} else {
@@ -133,8 +139,14 @@ type opMsg struct {
 func (kv *KVServer) startOp(op Op) (int, bool) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	if _, isL := kv.rf.GetState(); !isL {
+		return 0, false
+	}
+	if _, ok := kv.opStatus.Load(op.RequestID); ok {
+		return 0, true
+	}
 	index, _, isLeader := kv.rf.Start(op)
-	kv.opStatus[op.RequestID] = make(chan opMsg)
+	kv.opStatus.Store(op.RequestID, make(chan opMsg))
 	return index, isLeader
 }
 
@@ -150,8 +162,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	)
 	if isLeader {
 		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
+		v, _ := kv.opStatus.Load(op.RequestID)
 		select {
-		case <-kv.opStatus[op.RequestID]:
+		case <-v.(chan opMsg):
 			kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
 			reply.Err = OK
 		}
@@ -205,13 +218,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.data = make(map[string]string)
-	kv.opStatus = make(map[string]chan opMsg)
+	kv.opStatus = sync.Map{}
+	//kv.opStatus.RWMutex = sync.RWMutex{}
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	//c:=sync.map{}
 	//time.Sleep(5 * time.Second)
 	//You may need initialization code here.
 	go kv.applier()
