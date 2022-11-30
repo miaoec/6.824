@@ -119,6 +119,12 @@ type Raft struct {
 
 const IsDebug = false
 
+func (rf *Raft) GetStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
 func (rf *Raft) indexLog(index int) LogEntry {
 	if index < rf.lastIncludeEntry.Index {
 		panic("index(" + strconv.Itoa(index) + ")<rf.lastIncludeEntry.Index")

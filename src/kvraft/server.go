@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -64,18 +65,14 @@ type KVServer struct {
 	applyCh      chan raft.ApplyMsg
 	dead         int32 // set by Kill()
 	maxraftstate int   // snapshot if log grows this big
+	persister    *raft.Persister
 	data         map[string]string
 	opMp         sync.Map
-	reqMp        sync.Map
-	lastIndex    int64
+	reqMp        map[string]int
+	lastIndex    int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	//这里对于过时的get请求，查出来的数据有可能不线性
-	if v, ok := kv.reqMp.Load(args.ClientId); ok && args.SeqId <= v.(int) {
-		reply.Err = ErrIgnored
-		reply.Value = kv.data[args.Key]
-	}
 	op := Op{
 		OpType:   GET,
 		Key:      args.Key,
@@ -83,8 +80,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		SeqId:    args.SeqId,
 		//Value:  args.Value,
 	}
-	index, isLeader := kv.startOp(op)
-
+	index, isOld, isLeader := kv.startOp(op)
+	if isOld {
+		reply.Err = ErrIgnored
+		reply.Value = kv.data[args.Key]
+		return
+	}
 	if isLeader {
 		opMsg, ok := kv.opMp.Load(index)
 		if !ok {
@@ -119,6 +120,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) applier() {
 	kv.rf.GetState()
 	for ch := range kv.applyCh {
+		if ch.SnapshotValid {
+			kv.mu.Lock()
+			kv.log("will applier snapshot,%+v", ch)
+			if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
+				kv.log("applier snapshot,%+v", ch)
+				by := bytes.NewReader(ch.Snapshot)
+				de := labgob.NewDecoder(by)
+				if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
+
+					panic("sync snapshot error")
+				}
+				kv.lastIndex = ch.SnapshotIndex
+			}
+			kv.mu.Unlock()
+		}
 		if ch.CommandValid {
 			kv.mu.Lock()
 			op, ok := ch.Command.(Op)
@@ -126,8 +142,8 @@ func (kv *KVServer) applier() {
 				continue
 			}
 			kv.log("applier!!,%+v", ch)
-			if v, ok := kv.reqMp.Load(op.ClientId); !ok || op.SeqId > v.(int) {
-				kv.reqMp.Store(op.ClientId, op.SeqId)
+			if v, ok := kv.reqMp[op.ClientId]; !ok || op.SeqId > v {
+				kv.reqMp[op.ClientId] = op.SeqId
 				switch op.OpType {
 				case PUT:
 					kv.data[op.Key] = op.Value
@@ -139,15 +155,26 @@ func (kv *KVServer) applier() {
 					}
 				}
 			}
-			v, ok := kv.opMp.Load(ch.CommandIndex)
-			kv.mu.Unlock()
-			if ok {
+			kv.log("#######SIZE:%v", kv.rf.GetStateSize())
+			if _, isLeader := kv.rf.GetState(); ch.CommandIndex != 0 && isLeader && kv.rf.GetStateSize() > kv.maxraftstate {
+				kv.log("will create snapshot,%+v", ch)
+				by := new(bytes.Buffer)
+				e := labgob.NewEncoder(by)
+				if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
+					kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
+				} else {
+					panic("create snapshot error")
+				}
+			}
+			if v, ok := kv.opMp.Load(ch.CommandIndex); ok {
 				go func() {
 					kv.log("applier success!!,%+v,index opt found in opStatus", ch)
 					v.(chan Op) <- op
 				}()
 			}
+			kv.mu.Unlock()
 		}
+
 	}
 }
 
@@ -161,21 +188,23 @@ type opMSg struct {
 	successChan chan nullStruct
 }
 
-func (kv *KVServer) startOp(op Op) (int, bool) {
+func (kv *KVServer) startOp(op Op) (int, bool, bool) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	//这里对于过时的get请求，查出来的数据有可能不线性
+	if v, ok := kv.reqMp[op.ClientId]; ok && op.SeqId <= v {
+		return 0, true, false
+	}
 	if _, isL := kv.rf.GetState(); !isL {
-		return 0, false
+		return 0, false, false
 	}
 	index, _, isLeader := kv.rf.Start(op)
 	kv.opMp.Store(index, make(chan Op))
-	return index, isLeader
+
+	return index, false, isLeader
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	if v, ok := kv.reqMp.Load(args.ClientId); ok && args.SeqId <= v.(int) {
-		reply.Err = ErrIgnored
-	}
 	op := Op{
 		ClientId: args.ClientId,
 		SeqId:    args.SeqId,
@@ -183,8 +212,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Key:      args.Key,
 		Value:    args.Value,
 	}
-	index, isLeader := kv.startOp(op)
-
+	index, isOld, isLeader := kv.startOp(op)
+	if isOld {
+		reply.Err = ErrIgnored
+		return
+	}
 	if isLeader {
 		opMsg, ok := kv.opMp.Load(index)
 		if !ok {
@@ -254,6 +286,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.data = make(map[string]string)
+	kv.reqMp = make(map[string]int)
+	kv.persister = persister
 	//kv.opStatus = sync.Map{}
 	//kv.opStatus.RWMutex = sync.RWMutex{}
 	// You may need initialization code here.
