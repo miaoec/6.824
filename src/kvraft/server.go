@@ -8,6 +8,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = true
@@ -22,7 +23,7 @@ func (kv *KVServer) log(str string, args ...interface{}) {
 					str,
 				),
 				args...,
-			), kv.data,
+			), "",
 		)
 	}
 
@@ -37,59 +38,78 @@ const (
 )
 
 type Op struct {
-	RequestID string
-	OpType    OpType
-	Key       string
-	Value     string
+	ClientId string
+	SeqId    int
+	OpType   OpType
+	Key      string
+	Value    string
+	Index    int
+	Term     int
+
+	Result string
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
 
 type opMap struct {
-	m map[string]chan opMsg
+	m map[string]chan nullStruct
 	sync.RWMutex
 }
 
 type KVServer struct {
-	mu            sync.Mutex
-	me            int
-	rf            *raft.Raft
-	applyCh       chan raft.ApplyMsg
-	dead          int32 // set by Kill()
-	maxraftstate  int   // snapshot if log grows this big
-	data          map[string]string
-	opStatus      sync.Map
-	opIndexStatus sync.Map
-	lastIndex     int64
-	// Your definitions here.
+	mu           sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32 // set by Kill()
+	maxraftstate int   // snapshot if log grows this big
+	data         map[string]string
+	opMp         sync.Map
+	reqMp        sync.Map
+	lastIndex    int64
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-
+	//这里对于过时的get请求，查出来的数据有可能不线性
+	if v, ok := kv.reqMp.Load(args.ClientId); ok && args.SeqId <= v.(int) {
+		reply.Err = ErrIgnored
+		reply.Value = kv.data[args.Key]
+	}
 	op := Op{
-		OpType:    GET,
-		Key:       args.Key,
-		RequestID: args.RequestID,
+		OpType:   GET,
+		Key:      args.Key,
+		ClientId: args.ClientId,
+		SeqId:    args.SeqId,
 		//Value:  args.Value,
 	}
 	index, isLeader := kv.startOp(op)
 
 	if isLeader {
+		opMsg, ok := kv.opMp.Load(index)
+		if !ok {
+			panic(ErrFailed)
+		}
 		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
-		v, _ := kv.opStatus.Load(op.RequestID)
 		select {
-		case <-v.(chan opMsg):
+		case op := <-opMsg.(chan Op):
 			kv.mu.Lock()
-			kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
+			kv.log("get Msg:%+v,%+v", args, reply, index)
+			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
+				reply.Err = ErrFailed
+				kv.log("getFailed:%+v,%+v", args, reply, index)
+			}
 			if v, ok := kv.data[args.Key]; ok {
 				reply.Value = v
 				reply.Err = OK
-				kv.log("getSuccess:%+v,%+v,%+v", args, reply, index)
+				kv.log("getSuccess:%+v,%+v", args, reply, index)
 			} else {
 				reply.Err = ErrNoKey
 			}
 			kv.mu.Unlock()
+		case <-time.After(time.Second * 5):
+			kv.log("timeout putFailed:%+v,%+v", args, reply, index)
+			reply.Err = ErrFailed
 		}
 	} else {
 		reply.Err = ErrWrongLeader
@@ -106,34 +126,39 @@ func (kv *KVServer) applier() {
 				continue
 			}
 			kv.log("applier!!,%+v", ch)
-			switch op.OpType {
-			case PUT:
-				kv.data[op.Key] = op.Value
-			case APPEND:
-				if _, ok := kv.data[op.Key]; !ok {
+			if v, ok := kv.reqMp.Load(op.ClientId); !ok || op.SeqId > v.(int) {
+				kv.reqMp.Store(op.ClientId, op.SeqId)
+				switch op.OpType {
+				case PUT:
 					kv.data[op.Key] = op.Value
-				} else {
-					kv.data[op.Key] += op.Value
+				case APPEND:
+					if _, ok := kv.data[op.Key]; !ok {
+						kv.data[op.Key] = op.Value
+					} else {
+						kv.data[op.Key] += op.Value
+					}
 				}
 			}
-			kv.lastIndex = int64(ch.CommandIndex)
-			v, ok := kv.opStatus.Load(op.RequestID)
+			v, ok := kv.opMp.Load(ch.CommandIndex)
 			kv.mu.Unlock()
-			// = kv.opStatus.m[op.RequestID]
 			if ok {
 				go func() {
-					close(v.(chan opMsg))
 					kv.log("applier success!!,%+v,index opt found in opStatus", ch)
+					v.(chan Op) <- op
 				}()
-			} else {
-				kv.log("applier error!!,%+v,index opt found in opStatus", ch)
 			}
-
 		}
 	}
 }
 
-type opMsg struct {
+type nullStruct struct {
+}
+
+type opMSg struct {
+	term        int
+	index       int
+	failedChan  chan nullStruct
+	successChan chan nullStruct
 }
 
 func (kv *KVServer) startOp(op Op) (int, bool) {
@@ -142,36 +167,47 @@ func (kv *KVServer) startOp(op Op) (int, bool) {
 	if _, isL := kv.rf.GetState(); !isL {
 		return 0, false
 	}
-	if _, ok := kv.opStatus.Load(op.RequestID); ok {
-		return 0, true
-	}
 	index, _, isLeader := kv.rf.Start(op)
-	kv.opStatus.Store(op.RequestID, make(chan opMsg))
+	kv.opMp.Store(index, make(chan Op))
 	return index, isLeader
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	op := Op{
-		RequestID: args.RequestID,
-		OpType:    OpType(args.Op),
-		Key:       args.Key,
-		Value:     args.Value,
+	if v, ok := kv.reqMp.Load(args.ClientId); ok && args.SeqId <= v.(int) {
+		reply.Err = ErrIgnored
 	}
-	index, isLeader := kv.startOp(
-		op,
-	)
+	op := Op{
+		ClientId: args.ClientId,
+		SeqId:    args.SeqId,
+		OpType:   OpType(args.Op),
+		Key:      args.Key,
+		Value:    args.Value,
+	}
+	index, isLeader := kv.startOp(op)
+
 	if isLeader {
+		opMsg, ok := kv.opMp.Load(index)
+		if !ok {
+			panic(ErrFailed)
+		}
 		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
-		v, _ := kv.opStatus.Load(op.RequestID)
 		select {
-		case <-v.(chan opMsg):
-			kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
-			reply.Err = OK
+		case op := <-opMsg.(chan Op):
+			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
+				kv.log("timeout putFailed:%+v,%+v,%+v", args, reply, index)
+				reply.Err = ErrFailed
+			} else {
+				kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
+				reply.Err = OK
+			}
+		case <-time.After(time.Second * 5):
+			kv.log("timeout putFailed:%+v,%+v,%+v", args, reply, index)
+			reply.Err = ErrFailed
+
 		}
 	} else {
 		reply.Err = ErrWrongLeader
 	}
-
 }
 
 //
@@ -218,7 +254,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.data = make(map[string]string)
-	kv.opStatus = sync.Map{}
+	//kv.opStatus = sync.Map{}
 	//kv.opStatus.RWMutex = sync.RWMutex{}
 	// You may need initialization code here.
 

@@ -14,6 +14,8 @@ type Clerk struct {
 	// You will have to modify this struct.
 	leaderId int
 	cmds     []interface{}
+	seq      int
+	clientID string
 }
 
 const isDebug = true
@@ -45,6 +47,8 @@ func (ck *Clerk) checkoutLeaderId(leaderId int) {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.seq = 1
+	ck.clientID = uuid.NewString()[0:6]
 	// You'll have to add code here.
 	return ck
 }
@@ -62,20 +66,25 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+	ck.seq++
 	args := GetArgs{
-		RequestID: uuid.NewString()[0:10],
-		Key:       key,
+		ClientId: ck.clientID,
+		SeqId:    ck.seq,
+		Key:      key,
 	}
 	ck.cmds = append(ck.cmds, args)
 	ck.log("Get:%+v", args)
 	for {
 		ck.log("try send Get%+v, to %v", args, ck.leaderId)
-		reply := GetReply{RequestId: args.RequestID}
+		reply := GetReply{
+			ClientId: ck.clientID,
+			SeqId:    ck.seq,
+		}
 		if ck.servers[ck.leaderId].Call("KVServer.Get", &args, &reply) {
 			ck.log("Get reply%+v", reply)
-			if reply.Err == OK {
+			if reply.Err == OK || reply.Err == ErrIgnored {
 				return reply.Value
-			} else if reply.Err == ErrWrongLeader {
+			} else if reply.Err == ErrWrongLeader || reply.Err == ErrFailed {
 				ck.checkoutLeaderId(ck.leaderId + 1)
 			} else if reply.Err == ErrNoKey {
 				return ""
@@ -99,24 +108,29 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	ck.seq++
 	// You will have to modify this function.
 	//ck.servers.
 	args := PutAppendArgs{
-		RequestID: uuid.NewString()[0:10],
-		Op:        op,
-		Key:       key,
-		Value:     value,
+		ClientId: ck.clientID,
+		SeqId:    ck.seq,
+		Op:       op,
+		Key:      key,
+		Value:    value,
 	}
 	ck.cmds = append(ck.cmds, args)
 	ck.log("PutAppend:%+v", args)
 	for {
-		reply := PutAppendReply{RequestId: args.RequestID}
+		reply := PutAppendReply{
+			ClientId: ck.clientID,
+			SeqId:    ck.seq,
+		}
 		ck.log("try send PutAppend%+v, to %v", args, ck.leaderId)
 		if ck.servers[ck.leaderId].Call("KVServer.PutAppend", &args, &reply) {
 			ck.log("PutAppend reply%+v", reply)
-			if reply.Err == OK {
+			if reply.Err == OK || reply.Err == ErrIgnored {
 				return
-			} else if reply.Err == ErrWrongLeader {
+			} else if reply.Err == ErrWrongLeader || reply.Err == ErrFailed {
 				ck.checkoutLeaderId(ck.leaderId + 1)
 			}
 		} else {
@@ -127,7 +141,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-
 	ck.PutAppend(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {
