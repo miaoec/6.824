@@ -5,9 +5,71 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"log"
+	"time"
 )
 import "crypto/rand"
 import "math/big"
+
+func (ck *Clerk) Get(key string) string {
+	op := Op{
+		ClientId: ck.clientID,
+		SeqId:    ck.seq,
+		OpType:   GET,
+		Key:      key,
+	}
+	reply := Reply{}
+	ck.doOp(&op, &reply)
+	if v, ok := reply.Result.(string); ok {
+		return v
+	} else {
+		return ""
+	}
+}
+
+func (ck *Clerk) Put(key string, value string) {
+	//ck.PutAppend(key, value, "Put")
+	op := Op{
+		ClientId: ck.clientID,
+		SeqId:    ck.seq,
+		OpType:   PUT,
+		Key:      key,
+		Value:    value,
+	}
+	reply := Reply{}
+	ck.doOp(&op, &reply)
+}
+func (ck *Clerk) Append(key string, value string) {
+	//ck.PutAppend(key, value, "Append")
+	op := Op{
+		ClientId: ck.clientID,
+		SeqId:    ck.seq,
+		OpType:   APPEND,
+		Key:      key,
+		Value:    value,
+	}
+	reply := Reply{}
+	ck.doOp(&op, &reply)
+}
+
+func (ck *Clerk) doOp(op *Op, reply *Reply) {
+	ck.seq++
+	for {
+		ck.log("try send PutAppend%+v, to %v", op, ck.leaderId)
+		if ck.servers[ck.leaderId].Call("KVServer.Do", op, reply) {
+			ck.log("do reply%+v", reply)
+			if reply.Err == OK || reply.Err == ErrIgnored {
+				return
+			} else if reply.Err == ErrWrongLeader || reply.Err == ErrFailed {
+				ck.checkoutLeaderId(ck.leaderId + 1)
+			} else {
+				ck.log("reply error%+v", reply.Err)
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+}
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -18,10 +80,8 @@ type Clerk struct {
 	clientID string
 }
 
-const isDebug = false
-
 func (ck *Clerk) log(str string, args ...interface{}) {
-	if isDebug {
+	if ClientDebug {
 		log.Printf(
 			fmt.Sprintf(
 				"Ck(id:%v,leto:%v)##: %v", ck.clientID, ck.leaderId,
@@ -65,7 +125,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 //
-func (ck *Clerk) Get(key string) string {
+func (ck *Clerk) get(key string) string {
 	ck.seq++
 	args := GetArgs{
 		ClientId: ck.clientID,
@@ -137,11 +197,4 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		//time.Sleep(500 * time.Millisecond)
 	}
-}
-
-func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
-}
-func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
 }

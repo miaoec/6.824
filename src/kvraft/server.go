@@ -5,16 +5,16 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
 
-const Debug = false
-
 func (kv *KVServer) log(str string, args ...interface{}) {
-	if Debug {
+	if ServerDebug {
 		log.Printf(
 			"%v,%+v",
 			fmt.Sprintf(
@@ -26,10 +26,16 @@ func (kv *KVServer) log(str string, args ...interface{}) {
 			), "",
 		)
 	}
-
 }
 
-type OpType string
+var OpMap = map[OpType]OpFunc{
+	PUT:    OpFuncPut,
+	GET:    OpFuncGet,
+	APPEND: OpFuncAppend,
+}
+
+var ErrOpNotMatch = errors.New("error Op not match")
+var ErrKeyNotFound = errors.New(ErrNoKey)
 
 const (
 	PUT    OpType = "Put"
@@ -37,24 +43,32 @@ const (
 	APPEND        = "Append"
 )
 
-type Op struct {
-	ClientId string
-	SeqId    int
-	OpType   OpType
-	Key      string
-	Value    string
-	Index    int
-	Term     int
+type OpType string
+type OpFunc func(kv *KVServer, op Op) (interface{}, error)
 
-	Result string
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+func OpFuncPut(kv *KVServer, op Op) (interface{}, error) {
+	kv.data[op.Key] = op.Value
+	return nil, nil
 }
 
-type opMap struct {
-	m map[string]chan nullStruct
-	sync.RWMutex
+func OpFuncGet(kv *KVServer, op Op) (interface{}, error) {
+	if value, ok := kv.data[op.Key]; ok {
+		return value, nil
+	}
+	return "", ErrKeyNotFound
+}
+
+func OpFuncAppend(kv *KVServer, op Op) (interface{}, error) {
+	if _, ok := kv.data[op.Key]; !ok {
+		kv.data[op.Key] = op.Value
+	} else {
+		if v, ok := kv.data[op.Key].(string); ok {
+			kv.data[op.Key] = v + op.Value
+		} else {
+			return nil, errors.New("OpFuncAppend Error,dataType not str")
+		}
+	}
+	return nil, nil
 }
 
 type KVServer struct {
@@ -65,26 +79,21 @@ type KVServer struct {
 	dead         int32 // set by Kill()
 	maxraftstate int   // snapshot if log grows this big
 	persister    *raft.Persister
-	data         map[string]string
+	data         map[string]interface{}
 	opMp         sync.Map
 	reqMp        map[string]int
 	lastIndex    int
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	op := Op{
-		OpType:   GET,
-		Key:      args.Key,
-		ClientId: args.ClientId,
-		SeqId:    args.SeqId,
-		//Value:  args.Value,
-	}
-	index, isOld, isLeader := kv.startOp(op)
+func (kv *KVServer) Do(op *Op, reply *Reply) {
+	index, isOld, isLeader := kv.startOp(*op)
 	if isOld {
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		reply.Err = ErrIgnored
-		reply.Value = kv.data[args.Key]
+		if op.OpType == GET {
+			reply.Result = kv.data[op.Key]
+		}
 		return
 	}
 	if isLeader {
@@ -92,22 +101,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		if !ok {
 			panic(ErrFailed)
 		}
-		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
+		kv.log("%+v wait Index %v/%v", op, kv.lastIndex, index)
 		select {
-		case op := <-opMsg.(chan Op):
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			kv.log("get Msg:%+v,%+v", args, reply, index)
-			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
+		case result := <-opMsg.(chan Reply):
+			kv.log("get Msg:%+v,%+v", op, reply, index)
+			reply.CopyFrom(result)
+			if op.SeqId != result.SeqId || op.ClientId != result.ClientId {
 				reply.Err = ErrFailed
-				kv.log("getFailed:%+v,%+v", args, reply, index)
-			}
-			if v, ok := kv.data[args.Key]; ok {
-				reply.Value = v
-				reply.Err = OK
-				kv.log("getSuccess:%+v,%+v", args, reply, index)
-			} else {
-				reply.Err = ErrNoKey
+				kv.log("getFailed:%+v,%+v", op, reply, index)
 			}
 			return
 		}
@@ -117,65 +118,74 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) applier() {
-	kv.rf.GetState()
-	for ch := range kv.applyCh {
-		func(ch raft.ApplyMsg) {
-			kv.mu.Lock()
-			defer kv.mu.Unlock()
-			if ch.SnapshotValid {
-				kv.log("will applier snapshot,%+v", ch)
-				if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
-					kv.log("applier snapshot,%+v", ch)
-					by := bytes.NewReader(ch.Snapshot)
-					de := labgob.NewDecoder(by)
-					if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
-						panic("sync snapshot error")
+	for !kv.killed() {
+		select {
+		case ch := <-kv.applyCh:
+			func(ch raft.ApplyMsg) {
+				kv.mu.Lock()
+				defer kv.mu.Unlock()
+				if ch.SnapshotValid {
+					kv.log("will applier snapshot,%+v", ch)
+					if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
+						kv.log("applier snapshot,%+v", ch)
+						by := bytes.NewReader(ch.Snapshot)
+						de := labgob.NewDecoder(by)
+						if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
+							panic("sync snapshot error")
+						}
+						kv.lastIndex = ch.SnapshotIndex
 					}
-					kv.lastIndex = ch.SnapshotIndex
 				}
-			}
-			if ch.CommandValid {
-				op, ok := ch.Command.(Op)
-				if !ok {
-					return
-				}
-				kv.log("applier!!,%+v", ch)
-				if v, ok := kv.reqMp[op.ClientId]; !ok || op.SeqId > v {
-					kv.reqMp[op.ClientId] = op.SeqId
-					switch op.OpType {
-					case PUT:
-						kv.data[op.Key] = op.Value
-					case APPEND:
-						if _, ok := kv.data[op.Key]; !ok {
-							kv.data[op.Key] = op.Value
+				if ch.CommandValid {
+					op, ok := ch.Command.(Op)
+					if !ok {
+						return
+					}
+					kv.log("applier!!,%+v", ch)
+					if v, ok := kv.reqMp[op.ClientId]; !ok || op.SeqId > v {
+						kv.reqMp[op.ClientId] = op.SeqId
+						if f, ok := OpMap[op.OpType]; ok {
+							reply := Reply{
+								SeqId:    op.SeqId,
+								ClientId: op.ClientId,
+								//Result:   result,
+								ServerId: strconv.Itoa(kv.me),
+							}
+							result, err := f(kv, op)
+							reply.Result = result
+							reply.Result = result
+							if err != nil {
+								kv.log("reply error%+v", err)
+								reply.Err = err.Error()
+							}
+
+							if v, ok := kv.opMp.Load(ch.CommandIndex); ok {
+								go func() {
+									kv.log("applier success!!,%+v,index opt found in opStatus", ch)
+									v.(chan Reply) <- reply
+								}()
+							}
 						} else {
-							kv.data[op.Key] += op.Value
+							panic(ErrOpNotMatch)
 						}
 					}
-				}
-				kv.log("#######SIZE:%v", kv.rf.GetStateSize())
-				if ch.CommandIndex != 0 && kv.rf.GetStateSize() > kv.maxraftstate {
-					kv.log("will create snapshot,%+v", ch)
-					by := new(bytes.Buffer)
-					e := labgob.NewEncoder(by)
-					if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
-						kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
-					} else {
-						panic("create snapshot error")
+					//kv.log("#######SIZE:%v", kv.rf.GetStateSize())
+					if ch.CommandIndex != 0 && kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate {
+						kv.log("will create snapshot,%+v", ch)
+						by := new(bytes.Buffer)
+						e := labgob.NewEncoder(by)
+						if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
+							kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
+						} else {
+							panic("create snapshot error")
+						}
 					}
-				}
-				if v, ok := kv.opMp.Load(ch.CommandIndex); ok {
-					go func() {
-						kv.log("applier success!!,%+v,index opt found in opStatus", ch)
-						v.(chan Op) <- op
-					}()
-				}
-			}
-		}(ch)
-	}
-}
 
-type nullStruct struct {
+				}
+			}(ch)
+
+		}
+	}
 }
 
 func (kv *KVServer) startOp(op Op) (int, bool, bool) {
@@ -189,43 +199,8 @@ func (kv *KVServer) startOp(op Op) (int, bool, bool) {
 		return 0, false, false
 	}
 	index, _, isLeader := kv.rf.Start(op)
-	kv.opMp.Store(index, make(chan Op))
-
+	kv.opMp.Store(index, make(chan Reply))
 	return index, false, isLeader
-}
-
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	op := Op{
-		ClientId: args.ClientId,
-		SeqId:    args.SeqId,
-		OpType:   OpType(args.Op),
-		Key:      args.Key,
-		Value:    args.Value,
-	}
-	index, isOld, isLeader := kv.startOp(op)
-	if isOld {
-		reply.Err = ErrIgnored
-		return
-	}
-	if isLeader {
-		opMsg, ok := kv.opMp.Load(index)
-		if !ok {
-			panic(ErrFailed)
-		}
-		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
-		select {
-		case op := <-opMsg.(chan Op):
-			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
-				kv.log("seq too old:%+v,%+v,%+v", args, reply, index)
-				reply.Err = ErrFailed
-			} else {
-				kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
-				reply.Err = OK
-			}
-		}
-	} else {
-		reply.Err = ErrWrongLeader
-	}
 }
 
 //
@@ -277,11 +252,12 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(Reply{})
 
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-	kv.data = make(map[string]string)
+	kv.data = make(map[string]interface{})
 	kv.reqMp = make(map[string]int)
 	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -292,3 +268,81 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	go kv.applier()
 	return kv
 }
+
+//
+//func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+//	op := Op{
+//		ClientId: args.ClientId,
+//		SeqId:    args.SeqId,
+//		OpType:   OpType(args.Op),
+//		Key:      args.Key,
+//		Value:    args.Value,
+//	}
+//	index, isOld, isLeader := kv.startOp(op)
+//	if isOld {
+//		reply.Err = ErrIgnored
+//		return
+//	}
+//	if isLeader {
+//		opMsg, ok := kv.opMp.Load(index)
+//		if !ok {
+//			panic(ErrFailed)
+//		}
+//		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
+//		select {
+//		case op := <-opMsg.(chan Op):
+//			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
+//				kv.log("seq too old:%+v,%+v,%+v", args, reply, index)
+//				reply.Err = ErrFailed
+//			} else {
+//				kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
+//				reply.Err = OK
+//			}
+//		}
+//	} else {
+//		reply.Err = ErrWrongLeader
+//	}
+//}
+//func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+//	op := Op{
+//		OpType:   GET,
+//		Key:      args.Key,
+//		ClientId: args.ClientId,
+//		SeqId:    args.SeqId,
+//	}
+//	index, isOld, isLeader := kv.startOp(op)
+//	if isOld {
+//		kv.mu.Lock()
+//		defer kv.mu.Unlock()
+//		reply.Err = ErrIgnored
+//		//reply.Value = kv.data[args.Key]
+//		return
+//	}
+//	if isLeader {
+//		opMsg, ok := kv.opMp.Load(index)
+//		if !ok {
+//			panic(ErrFailed)
+//		}
+//		kv.log("%+v wait Index %v/%v", args, kv.lastIndex, index)
+//		select {
+//		case op := <-opMsg.(chan Op):
+//			kv.mu.Lock()
+//			defer kv.mu.Unlock()
+//			kv.log("get Msg:%+v,%+v", args, reply, index)
+//			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
+//				reply.Err = ErrFailed
+//				kv.log("getFailed:%+v,%+v", args, reply, index)
+//			}
+//			if v, ok := kv.data[args.Key]; ok {
+//				reply.Value = v
+//				reply.Err = OK
+//				kv.log("getSuccess:%+v,%+v", args, reply, index)
+//			} else {
+//				reply.Err = ErrNoKey
+//			}
+//			return
+//		}
+//	} else {
+//		reply.Err = ErrWrongLeader
+//	}
+//}
