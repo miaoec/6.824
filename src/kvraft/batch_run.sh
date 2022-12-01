@@ -2,8 +2,7 @@ rm -rf batch_test_tmp
 mkdir batch_test_tmp
 
 function doTest() {
-  go test -run  TestSnapshotRPC3B >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$.log
-  #  go test   >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$
+  go test -run 3B >batch_test_tmp/batch_run_figure8_testlog_$1_$2_$$.log
 }
 
 export -f doTest

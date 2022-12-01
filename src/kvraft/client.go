@@ -18,13 +18,13 @@ type Clerk struct {
 	clientID string
 }
 
-const isDebug = true
+const isDebug = false
 
 func (ck *Clerk) log(str string, args ...interface{}) {
 	if isDebug {
 		log.Printf(
 			fmt.Sprintf(
-				"Ck(id:%v)##: %v", ck.leaderId,
+				"Ck(id:%v,leto:%v)##: %v", ck.clientID, ck.leaderId,
 				str,
 			),
 			args...,

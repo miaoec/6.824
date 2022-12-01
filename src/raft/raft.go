@@ -196,8 +196,8 @@ func (rf *Raft) becomeLeader() {
 	rf.log("%v,becomeLeader", l)
 	rf.state = Leader
 	//noop log
-	//加上nooop log 会导致TestBasicAgree2B与TestRPCBytes2B 错误
-	//rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term, Index: rf.lastIndex() + 1})
+	//加上nooop log 会导致TestBasicAgree2B与TestRPCBytes2B 错误,破案了，noop日志在service端跳过没unlock导致死锁。。。。
+	rf.logs2 = append(rf.logs2, LogEntry{Cmd: 0, Term: rf.term, Index: rf.lastIndex() + 1})
 	for i, _ := range rf.peers {
 		rf.nextIndex[i] = rf.lastIndex() + 1
 		rf.matchIndex[i] = -1
@@ -283,17 +283,17 @@ func (rf *Raft) sendOne() {
 		var entries []LogEntry
 		preLog := LogEntry{Term: -1}
 		if rf.nextIndex[i]-1 < rf.lastIncludeEntry.Index && rf.lastIncludeEntry.Term != -1 {
+			installArgs := InstallSnapshotArgs{
+				Term:             rf.term,
+				LastIncludeTerm:  rf.lastIncludeEntry.Term,
+				LastIncludeIndex: rf.lastIncludeEntry.Index,
+				SnapShot:         rf.persister.ReadSnapshot(),
+			}
+			reply := InstallSnapshotReply{}
+			rf.log(
+				"send InstallSnapshot(%+v): installArgs:%+v", i, installArgs.logData(),
+			)
 			go func(server int) {
-				installArgs := InstallSnapshotArgs{
-					Term:             rf.term,
-					LastIncludeTerm:  rf.lastIncludeEntry.Term,
-					LastIncludeIndex: rf.lastIncludeEntry.Index,
-					SnapShot:         rf.persister.ReadSnapshot(),
-				}
-				reply := InstallSnapshotReply{}
-				rf.log(
-					"send InstallSnapshot(%+v): installArgs:%+v", i, installArgs.logData(),
-				)
 				if rf.sendInstallSnapshot(server, &installArgs, &reply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
@@ -379,7 +379,8 @@ func (rf *Raft) sendOne() {
 //leader 不能够主动提交之前任期的日志
 func (rf *Raft) updateCommitIndex() {
 	idx := rf.getMajorityMatchIndex()
-	if idx >= 0 && rf.indexLog(idx).Term == rf.term {
+	// && rf.lastIncludeEntry.Index > idx && rf.indexLog(idx).Term == rf.term
+	if idx >= 0 {
 		rf.commitIndex = idx
 	}
 }
@@ -483,12 +484,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if rf.lastIncludeEntry.Index >= lastIncludedIndex {
 		return false
 	}
-	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
 	if rf.lastIndex() < lastIncludedIndex || len(rf.logs2) == 0 {
 		rf.logs2 = []LogEntry{}
 	} else {
 		rf.logs2 = rf.logs2[lastIncludedIndex-rf.lastIncludeEntry.Index:]
 	}
+	rf.persister.SaveStateAndSnapshot(rf.getState(), snapshot)
 	rf.lastIncludeEntry.Term = lastIncludedTerm
 	rf.lastIncludeEntry.Index = lastIncludedIndex
 	rf.commitIndex = max(rf.commitIndex, lastIncludedIndex)
@@ -507,7 +508,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	defer rf.mu.Unlock()
 	index -= 1
 	defer rf.log("snapshot index%v", index)
-	if rf.commitIndex <= index {
+	if rf.commitIndex < index {
 		return
 	}
 	if rf.lastIncludeEntry.Index >= index {
@@ -755,7 +756,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotTerm:  args.LastIncludeTerm,
 		},
 	)
-	rf.applyChan <- applyMsg
+	//这里不加有可能造成死锁
+	go func() { rf.applyChan <- applyMsg }()
 	reply.Success = true
 }
 
@@ -862,7 +864,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 //
 func (rf *Raft) Kill() {
-	rf.log("crash,save logs%+v", rf.logs2)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	//
+	//rf.log("crash,save logs%+v", rf.logs2)
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	//rf.mainSpan.Finish()

@@ -9,13 +9,12 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func (kv *KVServer) log(str string, args ...interface{}) {
-	if isDebug {
+	if Debug {
 		log.Printf(
 			"%v,%+v",
 			fmt.Sprintf(
@@ -73,6 +72,7 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	kv.log("recv args:%v", args)
 	op := Op{
 		OpType:   GET,
 		Key:      args.Key,
@@ -82,6 +82,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	index, isOld, isLeader := kv.startOp(op)
 	if isOld {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
 		reply.Err = ErrIgnored
 		reply.Value = kv.data[args.Key]
 		return
@@ -95,6 +97,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		select {
 		case op := <-opMsg.(chan Op):
 			kv.mu.Lock()
+			defer kv.mu.Unlock()
 			kv.log("get Msg:%+v,%+v", args, reply, index)
 			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
 				reply.Err = ErrFailed
@@ -107,10 +110,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			} else {
 				reply.Err = ErrNoKey
 			}
-			kv.mu.Unlock()
-		case <-time.After(time.Second * 5):
-			kv.log("timeout putFailed:%+v,%+v", args, reply, index)
-			reply.Err = ErrFailed
+			return
 		}
 	} else {
 		reply.Err = ErrWrongLeader
@@ -120,60 +120,59 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) applier() {
 	kv.rf.GetState()
 	for ch := range kv.applyCh {
-		if ch.SnapshotValid {
+		func(ch raft.ApplyMsg) {
 			kv.mu.Lock()
-			kv.log("will applier snapshot,%+v", ch)
-			if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
-				kv.log("applier snapshot,%+v", ch)
-				by := bytes.NewReader(ch.Snapshot)
-				de := labgob.NewDecoder(by)
-				if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
-
-					panic("sync snapshot error")
+			defer kv.mu.Unlock()
+			if ch.SnapshotValid {
+				kv.log("will applier snapshot,%+v", ch)
+				if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
+					kv.log("applier snapshot,%+v", ch)
+					by := bytes.NewReader(ch.Snapshot)
+					de := labgob.NewDecoder(by)
+					if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
+						panic("sync snapshot error")
+					}
+					kv.lastIndex = ch.SnapshotIndex
 				}
-				kv.lastIndex = ch.SnapshotIndex
 			}
-			kv.mu.Unlock()
-		}
-		if ch.CommandValid {
-			kv.mu.Lock()
-			op, ok := ch.Command.(Op)
-			if !ok {
-				continue
-			}
-			kv.log("applier!!,%+v", ch)
-			if v, ok := kv.reqMp[op.ClientId]; !ok || op.SeqId > v {
-				kv.reqMp[op.ClientId] = op.SeqId
-				switch op.OpType {
-				case PUT:
-					kv.data[op.Key] = op.Value
-				case APPEND:
-					if _, ok := kv.data[op.Key]; !ok {
+			if ch.CommandValid {
+				op, ok := ch.Command.(Op)
+				if !ok {
+					return
+				}
+				kv.log("applier!!,%+v", ch)
+				if v, ok := kv.reqMp[op.ClientId]; !ok || op.SeqId > v {
+					kv.reqMp[op.ClientId] = op.SeqId
+					switch op.OpType {
+					case PUT:
 						kv.data[op.Key] = op.Value
-					} else {
-						kv.data[op.Key] += op.Value
+					case APPEND:
+						if _, ok := kv.data[op.Key]; !ok {
+							kv.data[op.Key] = op.Value
+						} else {
+							kv.data[op.Key] += op.Value
+						}
 					}
 				}
-			}
-			kv.log("#######SIZE:%v", kv.rf.GetStateSize())
-			if _, isLeader := kv.rf.GetState(); ch.CommandIndex != 0 && isLeader && kv.rf.GetStateSize() > kv.maxraftstate {
-				kv.log("will create snapshot,%+v", ch)
-				by := new(bytes.Buffer)
-				e := labgob.NewEncoder(by)
-				if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
-					kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
-				} else {
-					panic("create snapshot error")
+				kv.log("#######SIZE:%v", kv.rf.GetStateSize())
+				if ch.CommandIndex != 0 && kv.rf.GetStateSize() > kv.maxraftstate {
+					kv.log("will create snapshot,%+v", ch)
+					by := new(bytes.Buffer)
+					e := labgob.NewEncoder(by)
+					if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
+						kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
+					} else {
+						panic("create snapshot error")
+					}
+				}
+				if v, ok := kv.opMp.Load(ch.CommandIndex); ok {
+					go func() {
+						kv.log("applier success!!,%+v,index opt found in opStatus", ch)
+						v.(chan Op) <- op
+					}()
 				}
 			}
-			if v, ok := kv.opMp.Load(ch.CommandIndex); ok {
-				go func() {
-					kv.log("applier success!!,%+v,index opt found in opStatus", ch)
-					v.(chan Op) <- op
-				}()
-			}
-			kv.mu.Unlock()
-		}
+		}(ch)
 
 	}
 }
@@ -205,6 +204,7 @@ func (kv *KVServer) startOp(op Op) (int, bool, bool) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	kv.log("recv args:%v", args)
 	op := Op{
 		ClientId: args.ClientId,
 		SeqId:    args.SeqId,
@@ -226,16 +226,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		select {
 		case op := <-opMsg.(chan Op):
 			if op.SeqId != args.SeqId || op.ClientId != args.ClientId {
-				kv.log("timeout putFailed:%+v,%+v,%+v", args, reply, index)
+				kv.log("seq too old:%+v,%+v,%+v", args, reply, index)
 				reply.Err = ErrFailed
 			} else {
 				kv.log("putSuccess:%+v,%+v,%+v", args, reply, index)
 				reply.Err = OK
 			}
-		case <-time.After(time.Second * 5):
-			kv.log("timeout putFailed:%+v,%+v,%+v", args, reply, index)
-			reply.Err = ErrFailed
-
 		}
 	} else {
 		reply.Err = ErrWrongLeader
@@ -261,6 +257,16 @@ func (kv *KVServer) Kill() {
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
+}
+
+func (kv *KVServer) loadSnapshot(persister *raft.Persister) {
+	if persister.SnapshotSize() > 0 {
+		by := bytes.NewReader(persister.ReadSnapshot())
+		de := labgob.NewDecoder(by)
+		if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil) {
+			panic("sync snapshot error")
+		}
+	}
 }
 
 //
@@ -295,6 +301,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.loadSnapshot(persister)
 	//c:=sync.map{}
 	//time.Sleep(5 * time.Second)
 	//You may need initialization code here.
