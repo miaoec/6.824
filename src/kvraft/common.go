@@ -29,7 +29,6 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	//RequestID string
 	SeqId    int
 	ClientId string
 	Key      string

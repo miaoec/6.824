@@ -72,7 +72,6 @@ type KVServer struct {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	kv.log("recv args:%v", args)
 	op := Op{
 		OpType:   GET,
 		Key:      args.Key,
@@ -173,18 +172,10 @@ func (kv *KVServer) applier() {
 				}
 			}
 		}(ch)
-
 	}
 }
 
 type nullStruct struct {
-}
-
-type opMSg struct {
-	term        int
-	index       int
-	failedChan  chan nullStruct
-	successChan chan nullStruct
 }
 
 func (kv *KVServer) startOp(op Op) (int, bool, bool) {
@@ -204,7 +195,6 @@ func (kv *KVServer) startOp(op Op) (int, bool, bool) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	kv.log("recv args:%v", args)
 	op := Op{
 		ClientId: args.ClientId,
 		SeqId:    args.SeqId,
@@ -294,16 +284,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.reqMp = make(map[string]int)
 	kv.persister = persister
-	//kv.opStatus = sync.Map{}
-	//kv.opStatus.RWMutex = sync.RWMutex{}
-	// You may need initialization code here.
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.loadSnapshot(persister)
-	//c:=sync.map{}
-	//time.Sleep(5 * time.Second)
 	//You may need initialization code here.
 	go kv.applier()
 	return kv

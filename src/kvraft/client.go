@@ -93,7 +93,6 @@ func (ck *Clerk) Get(key string) string {
 			ck.log("Get reply failed")
 			ck.checkoutLeaderId(ck.leaderId + 1)
 		}
-		//time.Sleep(500 * time.Millisecond)
 	}
 }
 
