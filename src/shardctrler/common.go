@@ -44,30 +44,70 @@ type Config struct {
 
 }
 
-func (c *Config) ReBalance() {
+func (c *Config) ReBalance(sc *ShardCtrler, opts map[int]int) {
 	reShards := make([]int, 0)
 	gMap := make(map[int][]int)
-	//gNums := len(c.Groups)
+	gNums := len(c.Groups)
 	for idx, v := range c.Shards {
-		if _, ok := gMap[v]; !ok {
-			gMap[v] = []int{v}
+		if _, ok := c.Groups[v]; !ok {
+			c.Shards[idx] = -1
 		}
-		gMap[v] = append(gMap[v], idx)
-		if v == -1 {
+	}
+	for i, _ := range c.Groups {
+		if _, ok := gMap[i]; !ok {
+			gMap[i] = []int{}
+		}
+	}
+	for idx, v := range c.Shards {
+		if c.Shards[idx] >= 0 {
+			gMap[v] = append(gMap[v], idx)
+		} else {
 			reShards = append(reShards, idx)
 		}
 	}
-	gArr := make([][]int, len(gMap))
-	for _, v := range gMap {
-		gArr = append(gArr, v)
+	var gArr [][]int
+	for idx, v := range gMap {
+		gArr = append(gArr, append([]int{idx}, v...))
 	}
-	sort.Slice(
-		gArr, func(i, j int) bool {
-			return len(gArr[i]) > len(gArr[j])
-		},
-	)
-	//max, min, f := math.Ceil(float64(NShards/gNums)), NShards/gNums, false
-	//fmt.Println(max, min, f)
+	leftG := gNums
+	leftS := NShards
+	sc.log("reBalance2:gnums%v,%+v\n", gNums, gArr)
+	//这里先从大到小排序，然后尽量处于平衡,要保证排序结果不受map 遍历随机影响
+	sorF := func(i, j int) bool {
+		if len(gArr[i]) == len(gArr[j]) {
+			return gArr[i][0] > gArr[j][0]
+		}
+		return len(gArr[i]) > len(gArr[j])
+	}
+	sort.Slice(gArr, sorF)
+	for k, _ := range gArr {
+		for idx := 1; (len(gArr[k])-1)*(leftG) > leftS && idx < len(gArr[k]); idx++ {
+			if _, ok := opts[gArr[k][idx]]; !ok {
+				reShards = append(reShards, gArr[k][idx])
+				c.Shards[gArr[k][idx]] = -1
+				gArr[k] = append(gArr[k][:idx], gArr[k][idx+1:]...)
+				idx--
+			}
+		}
+		leftS -= len(gArr[k]) - 1
+		leftG--
+	}
+	sort.Slice(gArr, sorF)
+	reshardIdx := 0
+	leftG = gNums
+	leftS = NShards
+	sc.log("reBalance:gnums%v,%+v", gNums, gArr)
+	//fmt.Printlf("")
+	for i := range gArr {
+		for ; (len(gArr[i])-1)*(leftG) < leftS && reshardIdx < len(reShards); reshardIdx++ {
+			gArr[i] = append(gArr[i], reShards[reshardIdx])
+			c.Shards[reShards[reshardIdx]] = gArr[i][0]
+		}
+		leftG -= 1
+		leftS -= len(gArr[i]) - 1
+	}
+	sc.log("reBalance:%+v", gArr)
+	sc.lastBan = c
 }
 
 type Err string
@@ -115,7 +155,7 @@ type Op struct {
 	SeqId    int
 	OpType   OpType
 	Key      string
-	Value    string
+	Value    interface{}
 
 	// Your definitions here.
 	// Field names must start with capital letters,

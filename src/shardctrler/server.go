@@ -19,7 +19,8 @@ type ShardCtrler struct {
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
 	dead         int32 // set by Kill()
-	maxraftstate int   // snapshot if log grows this big
+	maxraftstate int   // snapshot if log grows this bigapplier!!
+	lastBan      *Config
 	persister    *raft.Persister
 	data         map[string]interface{}
 	opMp         sync.Map
@@ -30,67 +31,100 @@ type ShardCtrler struct {
 }
 
 func (sc *ShardCtrler) log(str string, args ...interface{}) {
-	if ServerDebug {
+	return
+	if ServerDebug && sc != nil {
 		log.Printf(
-			"%v,%+v",
+			"%v",
 			fmt.Sprintf(
 				fmt.Sprintf(
 					"scServer(id:%v,lastIndex:%v,%v)##:", sc.me, sc.lastIndex,
 					str,
 				),
 				args...,
-			), "",
+			),
 		)
 	}
 }
 
 func setLatestIndex(sc *ShardCtrler, index int) {
-	sc.data["-1"] = index
+	sc.data["lastIndex"] = index
 }
 
 func getLatestIndex(sc *ShardCtrler) int {
-	if v, ok := sc.data["-1"]; ok {
+	if v, ok := sc.data["lastIndex"]; ok {
 		return v.(int)
 	}
 	return 0
 }
 
-func getIndexConf(sc *ShardCtrler, index int) Config {
-	if v, ok := sc.data[string(index)]; ok {
-		return v.(Config)
+func getIndexConf(sc *ShardCtrler, index string) (Config, error) {
+	if v, ok := sc.data[index]; ok {
+		return v.(Config), nil
 	}
-	return Config{}
+	return Config{}, ErrKeyNotFound
 }
 
 var OpMap = map[OpType]OpFunc{
 	Join: func(sc *ShardCtrler, op Op) (interface{}, error) {
 		lastIndex := getLatestIndex(sc)
-		//Conf := getIndexConf(sc, lastIndex)
-		//index, err := strconv.Atoi()
-		//if err != nil {
-		//	return nil, err
-		//}
-		//Conf.Groups[index] =
+		conf, _ := getIndexConf(sc, strconv.Itoa(lastIndex))
+		newGroup := make(map[int][]string)
+		c, _ := op.Value.(JoinArgs)
+		for i, ints := range conf.Groups {
+			newGroup[i] = ints
+		}
+		for i, ints := range c.Servers {
+			newGroup[i] = ints
+		}
+		newConfig := Config{Shards: conf.Shards, Groups: newGroup, Num: lastIndex + 1}
+		newConfig.ReBalance(sc, map[int]int{})
+		sc.data[strconv.Itoa(lastIndex+1)] = newConfig
 		setLatestIndex(sc, lastIndex+1)
 		return nil, nil
 	},
+
 	Query: func(sc *ShardCtrler, op Op) (interface{}, error) {
-		if v, ok := sc.data[op.Key]; !ok || op.Value == "-1" {
-			return "", nil
-		} else {
-			return v, nil
+		args := op.Value.(QueryArgs)
+		config, err := getIndexConf(sc, strconv.Itoa(args.Num))
+		if err == ErrKeyNotFound {
+			config, _ = getIndexConf(sc, strconv.Itoa(getLatestIndex(sc)))
 		}
+		return config, nil
 	},
 	Leave: func(sc *ShardCtrler, op Op) (interface{}, error) {
+		lastIndex := getLatestIndex(sc)
+		conf, _ := getIndexConf(sc, strconv.Itoa(lastIndex))
+		newGroup := make(map[int][]string)
+		leavSet := map[string]struct{}{}
+		c, _ := op.Value.(LeaveArgs)
+		for _, s := range c.GIDs {
+			leavSet[strconv.Itoa(s)] = struct{}{}
+		}
+		for i, ints := range conf.Groups {
+			if _, ok := leavSet[strconv.Itoa(i)]; !ok {
+				newGroup[i] = ints
+			}
+		}
+		newConfig := Config{Shards: conf.Shards, Groups: newGroup, Num: lastIndex + 1}
+		newConfig.ReBalance(sc, map[int]int{})
+		sc.data[strconv.Itoa(lastIndex+1)] = newConfig
+		setLatestIndex(sc, lastIndex+1)
 		return nil, nil
 	},
 	Move: func(sc *ShardCtrler, op Op) (interface{}, error) {
+		lastIndex := getLatestIndex(sc)
+		conf, _ := getIndexConf(sc, strconv.Itoa(lastIndex))
+		c := op.Value.(MoveArgs)
+		newConfig := Config{Shards: conf.Shards, Groups: conf.Groups, Num: lastIndex + 1}
+		newConfig.Shards[c.Shard] = c.GID
+		newConfig.ReBalance(sc, map[int]int{c.Shard: c.GID})
+		sc.data[strconv.Itoa(lastIndex+1)] = newConfig
+		setLatestIndex(sc, lastIndex+1)
 		return nil, nil
 	},
 }
-
+var ErrKeyNotFound = errors.New("ErrNoKey")
 var ErrOpNotMatch = errors.New("error Op not match")
-var ErrKeyNotFound = errors.New(ErrNoKey)
 
 const (
 	Join  OpType = "Join"
@@ -104,6 +138,9 @@ type OpFunc func(sc *ShardCtrler, op Op) (interface{}, error)
 
 func (sc *ShardCtrler) Do(op *Op, reply *Reply) {
 	index, isOld, isLeader := sc.startOp(*op)
+	defer func() {
+		reply.ServerId = strconv.Itoa(sc.me)
+	}()
 	if isOld {
 		sc.mu.Lock()
 		defer sc.mu.Unlock()
@@ -121,7 +158,7 @@ func (sc *ShardCtrler) Do(op *Op, reply *Reply) {
 		sc.log("%+v wait Index %v/%v", op, sc.lastIndex, index)
 		select {
 		case result := <-opMsg.(chan Reply):
-			sc.log("get Msg:%+v,%+v", op, reply, index)
+			sc.log("get Msg:%+v,%+v,%v", result, op, index)
 			reply.CopyFrom(result)
 			if op.SeqId != result.SeqId || op.ClientId != result.ClientId {
 				reply.Err = ErrFailed
@@ -167,9 +204,9 @@ func (sc *ShardCtrler) applier() {
 								ClientId: op.ClientId,
 								//Result:   result,
 								ServerId: strconv.Itoa(sc.me),
+								Err:      OK,
 							}
 							result, err := f(sc, op)
-							reply.Result = result
 							reply.Result = result
 							if err != nil {
 								sc.log("reply error%+v", err)
@@ -279,16 +316,28 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	labgob.Register(Op{})
 	labgob.Register(Reply{})
+	labgob.Register(QueryArgs{})
+	labgob.Register(Config{})
+	labgob.Register(LeaveArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(JoinArgs{})
 
 	sc := new(ShardCtrler)
 	sc.me = me
 	sc.maxraftstate = -1
-	sc.data = make(map[string]interface{})
+	sc.data = map[string]interface{}{
+		"lastIndex": 0,
+		"0": Config{
+			Groups: map[int][]string{},
+		},
+	}
+
 	sc.reqMp = make(map[string]int)
 	sc.persister = persister
 	sc.applyCh = make(chan raft.ApplyMsg)
 
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+
 	//sc.loadSnapshot(persister)
 	//You may need initialization code here.
 	//sc.

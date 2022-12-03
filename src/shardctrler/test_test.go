@@ -165,13 +165,17 @@ func TestBasic(t *testing.T) {
 		for i := 0; i < NShards; i++ {
 			if i < NShards/2 {
 				if cf2.Shards[i] != gid3 {
-					t.Fatalf("expected shard %v on gid %v actually %v",
-						i, gid3, cf2.Shards[i])
+					t.Fatalf(
+						"expected shard %v on gid %v actually %v",
+						i, gid3, cf2.Shards[i],
+					)
 				}
 			} else {
 				if cf2.Shards[i] != gid4 {
-					t.Fatalf("expected shard %v on gid %v actually %v",
-						i, gid4, cf2.Shards[i])
+					t.Fatalf(
+						"expected shard %v on gid %v actually %v",
+						i, gid4, cf2.Shards[i],
+					)
 				}
 			}
 		}
@@ -183,6 +187,7 @@ func TestBasic(t *testing.T) {
 	fmt.Printf("Test: Concurrent leave/join ...\n")
 
 	const npara = 10
+
 	var cka [npara]*Clerk
 	for i := 0; i < len(cka); i++ {
 		cka[i] = cfg.makeClient(cfg.All())
@@ -213,10 +218,15 @@ func TestBasic(t *testing.T) {
 	c1 := ck.Query(-1)
 	for i := 0; i < 5; i++ {
 		var gid = int(npara + 1 + i)
-		ck.Join(map[int][]string{gid: []string{
-			fmt.Sprintf("%da", gid),
-			fmt.Sprintf("%db", gid),
-			fmt.Sprintf("%db", gid)}})
+		ck.Join(
+			map[int][]string{
+				gid: []string{
+					fmt.Sprintf("%da", gid),
+					fmt.Sprintf("%db", gid),
+					fmt.Sprintf("%db", gid),
+				},
+			},
+		)
 	}
 	c2 := ck.Query(-1)
 	for i := int(1); i <= npara; i++ {
@@ -266,10 +276,12 @@ func TestMulti(t *testing.T) {
 
 	var gid1 int = 1
 	var gid2 int = 2
-	ck.Join(map[int][]string{
-		gid1: []string{"x", "y", "z"},
-		gid2: []string{"a", "b", "c"},
-	})
+	ck.Join(
+		map[int][]string{
+			gid1: []string{"x", "y", "z"},
+			gid2: []string{"a", "b", "c"},
+		},
+	)
 	check(t, []int{gid1, gid2}, ck)
 	cfa[1] = ck.Query(-1)
 
@@ -321,14 +333,17 @@ func TestMulti(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			var gid int = gids[i]
-			cka[i].Join(map[int][]string{
-				gid: []string{
-					fmt.Sprintf("%da", gid),
-					fmt.Sprintf("%db", gid),
-					fmt.Sprintf("%dc", gid)},
-				gid + 1000: []string{fmt.Sprintf("%da", gid+1000)},
-				gid + 2000: []string{fmt.Sprintf("%da", gid+2000)},
-			})
+			cka[i].Join(
+				map[int][]string{
+					gid: []string{
+						fmt.Sprintf("%da", gid),
+						fmt.Sprintf("%db", gid),
+						fmt.Sprintf("%dc", gid),
+					},
+					gid + 1000: []string{fmt.Sprintf("%da", gid+1000)},
+					gid + 2000: []string{fmt.Sprintf("%da", gid+2000)},
+				},
+			)
 			cka[i].Leave([]int{gid + 1000, gid + 2000})
 		}(xi)
 	}
@@ -400,4 +415,33 @@ func TestMulti(t *testing.T) {
 	check_same_config(t, c, c1)
 
 	fmt.Printf("  ... Passed\n")
+}
+
+func TestConfig_ReBalance(t *testing.T) {
+	latestShard := [10]int{}
+	for i := 0; i < 10; i++ {
+		c := Config{
+			Num:    1,
+			Shards: [10]int{503, 503, 503, 504, 503, 504, 504, 504, 504, 504},
+			Groups: map[int][]string{
+				504: []string{"a"},
+				503: []string{"b"},
+				501: []string{"b"},
+				502: []string{"b"},
+				//3: []string{"c"},
+			},
+		}
+		//t.Log(c)
+		c.ReBalance(&ShardCtrler{}, map[int]int{9: 504})
+		if i != 0 {
+			for j, _ := range latestShard {
+				if latestShard[j] != c.Shards[j] {
+					t.Fatalf("latestShard[%v]!=c.Shards[%v],expect %v,actualy %v", j, j, latestShard[j], c.Shards[j])
+				}
+			}
+		}
+		latestShard = c.Shards
+
+		t.Log(c.Shards)
+	}
 }
