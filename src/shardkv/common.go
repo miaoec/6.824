@@ -18,7 +18,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrFailed      = "Failed to apply"
 	ErrIgnored     = "ErrIgnored"
-	ClientDebug    = true
+	ClientDebug    = false
 	ServerDebug    = true
 	TestDebug      = false
 

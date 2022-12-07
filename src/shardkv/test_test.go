@@ -87,6 +87,7 @@ func TestStaticShards(t *testing.T) {
 
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
+	fmt.Printf("Restart Group1")
 	//重新启动之后有bug，。。。。。
 	time.Sleep(10 * time.Second)
 	for i := 0; i < n; i++ {

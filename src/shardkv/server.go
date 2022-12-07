@@ -198,12 +198,17 @@ func (kv *ShardKV) applier(ctx context.Context) {
 	}
 }
 func (kv *ShardKV) log(str string, args ...interface{}) {
+	_, isL := kv.rf.GetState()
+	state := "Follower"
+	if isL {
+		state = "Leader"
+	}
 	if ServerDebug && kv != nil {
 		log.Printf(
 			"%v",
 			fmt.Sprintf(
 				fmt.Sprintf(
-					"kvServer(id:%v-%v,%v)##:", kv.gid, kv.me,
+					"kvServer(id:%v-%v,%v,%v)##:", kv.gid, kv.me, state,
 					str,
 				),
 				args...,
@@ -387,7 +392,11 @@ func (kv *ShardKV) applySnapshot(ch raft.ApplyMsg) {
 }
 
 func (kv *ShardKV) applyConfigCommand(config shardctrler.Config, commandIndex int) {
-	kv.log("applyConfigCommand%+v", config)
+	kv.log("applyConfigCommand%+v,Index%v", config, commandIndex)
+	if config.Num <= kv.config.Num {
+		//这里可能会由于重启，在回放log的时候导致pullConfig写了版本较小的config，需要屏蔽
+		return
+	}
 	kv.lastConfig = kv.config
 	kv.config = config
 	for shard, g := range config.Shards {
