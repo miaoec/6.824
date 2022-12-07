@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -43,10 +45,18 @@ func (log *OpLog) Read() []porcupine.Operation {
 // the monotonic clock
 var t0 = time.Now()
 
+func logf(str string, args ...interface{}) {
+	if TestDebug {
+		fmt.Printf(str, args...)
+	}
+}
+
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	start := int64(time.Since(t0))
-	fmt.Printf("tget:%v\n", key)
+	if TestDebug {
+		logf("tget:%v\n", key)
+	}
 	v := ck.Get(key)
 	end := int64(time.Since(t0))
 	cfg.op()
@@ -67,7 +77,11 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 
 func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
-	fmt.Printf("tput:%v,%v\n", key, value)
+
+	logf("tput:%v,%v\n", key, value)
+	c := Op{Value: value}
+	fmt.Print(c)
+
 	ck.Put(key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
@@ -86,7 +100,7 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 
 func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := int64(time.Since(t0))
-	fmt.Printf("tappend:%v,%v\n", key, value)
+	logf("tappend:%v,%v\n", key, value)
 	ck.Append(key, value)
 	end := int64(time.Since(t0))
 	cfg.op()
@@ -127,10 +141,13 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 		ca[cli] = make(chan bool)
 		go run_client(t, cfg, cli, ca[cli], fn)
 	}
-	// log.Printf("spawn_clients_and_wait: waiting for clients")
+
+	logf("spawn_clients_and_wait: waiting for clients")
+
 	for cli := 0; cli < ncli; cli++ {
 		ok := <-ca[cli]
-		// log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
+		logf("spawn_clients_and_wait: client %d is done\n", cli)
+
 		if ok == false {
 			t.Fatalf("failure")
 		}
@@ -265,7 +282,6 @@ func GenericTest(
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(
@@ -279,6 +295,8 @@ func GenericTest(
 					Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
 				}
 				for atomic.LoadInt32(&done_clients) == 0 {
+					logf("foo %v", j)
+
 					var key string
 					if randomkeys {
 						key = strconv.Itoa(rand.Intn(nclients))
@@ -350,7 +368,8 @@ func GenericTest(
 
 		// log.Printf("wait for clients\n")
 		for i := 0; i < nclients; i++ {
-			// log.Printf("read from clients %d\n", i)
+			logf("read from clients %d\n", i)
+
 			j := <-clnts[i]
 			// if j < 10 {
 			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
@@ -504,7 +523,7 @@ func TestOnePartition3A(t *testing.T) {
 
 	p1, p2 := cfg.make_partition()
 	cfg.partition(p1, p2)
-
+	t.Logf("partition 2%+v,%+v", p1, p2)
 	ckp1 := cfg.makeClient(p1)  // connect ckp1 to p1
 	ckp2a := cfg.makeClient(p2) // connect ckp2a to p2
 	ckp2b := cfg.makeClient(p2) // connect ckp2b to p2

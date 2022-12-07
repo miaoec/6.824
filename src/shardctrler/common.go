@@ -30,9 +30,9 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrFailed      = "Failed to apply"
 	ErrIgnored     = "ErrIgnored"
-	ClientDebug    = true
-	ServerDebug    = true
-	TestDebug      = true
+	ClientDebug    = false
+	ServerDebug    = false
+	TestDebug      = false
 )
 
 // A configuration -- an assignment of shards to groups.

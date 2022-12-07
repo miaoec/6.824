@@ -94,8 +94,10 @@ func (cfg *config) checklogs() {
 			raft := cfg.groups[gi].saved[i].RaftStateSize()
 			snap := len(cfg.groups[gi].saved[i].ReadSnapshot())
 			if cfg.maxraftstate >= 0 && raft > 8*cfg.maxraftstate {
-				cfg.t.Fatalf("persister.RaftStateSize() %v, but maxraftstate %v",
-					raft, cfg.maxraftstate)
+				cfg.t.Fatalf(
+					"persister.RaftStateSize() %v, but maxraftstate %v",
+					raft, cfg.maxraftstate,
+				)
 			}
 			if cfg.maxraftstate < 0 && snap > 0 {
 				cfg.t.Fatalf("maxraftstate is -1, but snapshot is non-empty!")
@@ -129,13 +131,15 @@ func (cfg *config) makeClient() *Clerk {
 		cfg.net.Enable(endnames[j], true)
 	}
 
-	ck := MakeClerk(ends, func(servername string) *labrpc.ClientEnd {
-		name := randstring(20)
-		end := cfg.net.MakeEnd(name)
-		cfg.net.Connect(name, servername)
-		cfg.net.Enable(name, true)
-		return end
-	})
+	ck := MakeClerk(
+		ends, func(servername string) *labrpc.ClientEnd {
+			name := randstring(20)
+			end := cfg.net.MakeEnd(name)
+			cfg.net.Connect(name, servername)
+			cfg.net.Enable(name, true)
+			return end
+		},
+	)
 	cfg.clerks[ck] = endnames
 	cfg.nextClientId++
 	return ck
@@ -243,7 +247,8 @@ func (cfg *config) StartServer(gi int, i int) {
 	}
 	cfg.mu.Unlock()
 
-	gg.servers[i] = StartServer(ends, i, gg.saved[i], cfg.maxraftstate,
+	gg.servers[i] = StartServer(
+		ends, i, gg.saved[i], cfg.maxraftstate,
 		gg.gid, mends,
 		func(servername string) *labrpc.ClientEnd {
 			name := randstring(20)
@@ -251,7 +256,8 @@ func (cfg *config) StartServer(gi int, i int) {
 			cfg.net.Connect(name, servername)
 			cfg.net.Enable(name, true)
 			return end
-		})
+		},
+	)
 
 	kvsvc := labrpc.MakeService(gg.servers[i])
 	rfsvc := labrpc.MakeService(gg.servers[i].rf)
@@ -336,12 +342,14 @@ func (cfg *config) leavem(gis []int) {
 var ncpu_once sync.Once
 
 func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config {
-	ncpu_once.Do(func() {
-		if runtime.NumCPU() < 2 {
-			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
-		}
-		rand.Seed(makeSeed())
-	})
+	ncpu_once.Do(
+		func() {
+			if runtime.NumCPU() < 2 {
+				fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
+			}
+			rand.Seed(makeSeed())
+		},
+	)
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t

@@ -1264,6 +1264,6 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	a := []int{1, 2, 3}
-	t.Log(a[:0])
+	//a := []int{1, 2, 3}
+	t.Log(string(rune(1000)))
 }

@@ -20,9 +20,6 @@ type PutAppendArgs struct {
 	Key      string
 	Value    string
 	Op       string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 type PutAppendReply struct {
@@ -51,10 +48,6 @@ type Op struct {
 	OpType   OpType
 	Key      string
 	Value    string
-
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 }
 
 type Reply struct {

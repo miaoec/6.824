@@ -23,10 +23,10 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
 	leaderId int
+	cmdIn    io.Writer
 	cmds     []interface{}
 	seq      int
 	clientID string
-	cmdIn    io.Writer
 }
 
 func nrand() int64 {
@@ -42,7 +42,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// Your code here.
 	ck.seq = 1
 	ck.clientID = uuid.NewString()[0:6]
-	ck.cmdIn, _ = os.Create(ck.clientID + ".client.log")
+	if ClientDebug {
+		ck.cmdIn, _ = os.Create(ck.clientID + ".client.log")
+	}
 	return ck
 }
 
@@ -60,7 +62,9 @@ func (ck *Clerk) log(str string, args ...interface{}) {
 func (ck *Clerk) cmd(op Op) {
 	ck.cmds = append(ck.cmds, op)
 	by, _ := json.Marshal(op)
-	fmt.Fprintf(ck.cmdIn, "%+v\n", string(by))
+	if ClientDebug {
+		fmt.Fprintf(ck.cmdIn, "%+v\n", string(by))
+	}
 }
 
 func (ck *Clerk) checkoutLeaderId(leaderId int) {
@@ -71,6 +75,8 @@ func (ck *Clerk) doOp(op *Op, reply *Reply) {
 	ck.Lock()
 	defer ck.Unlock()
 	ck.seq++
+	op.SeqId = ck.seq
+	op.ClientId = ck.clientID
 	for {
 		ck.log("try send Req%+v, to %v", op, ck.leaderId)
 		if ck.servers[ck.leaderId].Call("ShardCtrler.Do", op, reply) {
@@ -91,7 +97,7 @@ func (ck *Clerk) doOp(op *Op, reply *Reply) {
 }
 
 func (ck *Clerk) Query(num int) Config {
-	op := Op{Value: &QueryArgs{Num: num}, OpType: Query, ClientId: ck.clientID, SeqId: ck.seq}
+	op := Op{Value: &QueryArgs{Num: num}, OpType: Query}
 	reply := Reply{}
 	ck.doOp(&op, &reply)
 	c := reply.Result.(Config)
@@ -99,19 +105,19 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	op := Op{Value: &JoinArgs{Servers: servers}, OpType: Join, ClientId: ck.clientID, SeqId: ck.seq}
+	op := Op{Value: &JoinArgs{Servers: servers}, OpType: Join}
 	reply := Reply{}
 	ck.doOp(&op, &reply)
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	op := Op{Value: &LeaveArgs{GIDs: gids}, OpType: Leave, ClientId: ck.clientID, SeqId: ck.seq}
+	op := Op{Value: &LeaveArgs{GIDs: gids}, OpType: Leave}
 	reply := Reply{}
 	ck.doOp(&op, &reply)
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	op := Op{Value: &MoveArgs{Shard: shard, GID: gid}, OpType: Move, ClientId: ck.clientID, SeqId: ck.seq}
+	op := Op{Value: &MoveArgs{Shard: shard, GID: gid}, OpType: Move}
 	reply := Reply{}
 	ck.doOp(&op, &reply)
 }

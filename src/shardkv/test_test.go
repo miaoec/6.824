@@ -46,7 +46,7 @@ func TestStaticShards(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
-	// make sure that the data really is sharded by
+	// make sure that the Data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
 	cfg.ShutdownGroup(1)
@@ -87,7 +87,10 @@ func TestStaticShards(t *testing.T) {
 
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
+	//重新启动之后有bug，。。。。。
+	time.Sleep(10 * time.Second)
 	for i := 0; i < n; i++ {
+
 		check(t, ck, ka[i], va[i])
 	}
 
