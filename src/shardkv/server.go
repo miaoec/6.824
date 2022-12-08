@@ -23,6 +23,16 @@ type Shard struct {
 	Status ShardStatus
 }
 
+func (s Shard) deepCopy() Shard {
+	data := make(map[string]interface{})
+	if s.Data != nil {
+		for s2, i := range s.Data {
+			data[s2] = i
+		}
+	}
+	return Shard{Data: data, Status: s.Status}
+}
+
 type ShardStatus string
 
 const (
@@ -110,13 +120,18 @@ func StartServer(
 	kv.gid = gid
 	kv.ctrlers = ctrlers
 	kv.config = shardctrler.Config{Num: 0}
+	kv.lastConfig = shardctrler.Config{Num: -1}
 	kv.data = make(map[int]*Shard)
 
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.reqMp = make(map[string]int)
-	kv.loadSnapshot(persister)
+	if persister.SnapshotSize() > 0 {
+		kv.loadSnapshot(persister.ReadSnapshot())
+	}
+
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf.LogName = kv.name()
 	time.Sleep(100 * time.Millisecond)
 
 	go pprof.Do(
@@ -136,11 +151,12 @@ func StartServer(
 	return kv
 }
 
-func (kv *ShardKV) loadSnapshot(persister *raft.Persister) {
-	if persister.SnapshotSize() > 0 {
-		by := bytes.NewReader(persister.ReadSnapshot())
+func (kv *ShardKV) loadSnapshot(snapShot []byte) {
+	if len(snapShot) > 0 {
+		by := bytes.NewReader(snapShot)
 		de := labgob.NewDecoder(by)
-		if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil && de.Decode(&kv.config) == nil) {
+		if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil &&
+			de.Decode(&kv.config) == nil && de.Decode(&kv.lastConfig) == nil) {
 			panic("sync snapshot error")
 		}
 	}
@@ -191,6 +207,7 @@ func (kv *ShardKV) applier(ctx context.Context) {
 				}
 				if ch.CommandValid {
 					kv.applyCommand(ch)
+
 				}
 			}(ch)
 
@@ -308,6 +325,7 @@ func (kv *ShardKV) syncConfig(ctx context.Context) {
 
 func (kv *ShardKV) applyCommand(ch raft.ApplyMsg) {
 	cm, ok := ch.Command.(Command)
+
 	if ok {
 		switch cm.CommandType {
 		case LogCommand:
@@ -315,7 +333,17 @@ func (kv *ShardKV) applyCommand(ch raft.ApplyMsg) {
 		case ConfigCommand:
 			kv.applyConfigCommand(cm.ConfigCommand, ch.CommandIndex)
 		case ShardCommand:
-			kv.applyShardCommand(cm.ShardCommand, ch.CommandIndex)
+			kv.applyShardCommand(cm.ShardCommand.deepCopy(), ch.CommandIndex)
+		}
+	}
+	if ch.CommandIndex != 0 && kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate {
+		kv.log("will create snapshot,%+v", ch)
+		by := new(bytes.Buffer)
+		e := labgob.NewEncoder(by)
+		if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil && e.Encode(kv.config) == nil && e.Encode(kv.lastConfig) == nil {
+			kv.rf.Snapshot(ch.CommandIndex, by.Bytes())
+		} else {
+			panic("create snapshot error")
 		}
 	}
 }
@@ -365,27 +393,13 @@ func (kv *ShardKV) applyLogCommand(op Op, commandIndex int) {
 			panic("ErrOpNotMatch")
 		}
 	}
-	if commandIndex != 0 && kv.maxraftstate != -1 && kv.rf.GetStateSize() > kv.maxraftstate {
-		kv.log("will create snapshot,%+v", op)
-		by := new(bytes.Buffer)
-		e := labgob.NewEncoder(by)
-		if e.Encode(kv.data) == nil && e.Encode(kv.reqMp) == nil {
-			kv.rf.Snapshot(commandIndex, by.Bytes())
-		} else {
-			panic("create snapshot error")
-		}
-	}
 }
 
 func (kv *ShardKV) applySnapshot(ch raft.ApplyMsg) {
 	kv.log("will applier snapshot,%+v", ch)
 	if kv.rf.CondInstallSnapshot(ch.SnapshotTerm, ch.SnapshotIndex, ch.Snapshot) {
 		kv.log("applier snapshot,%+v", ch)
-		by := bytes.NewReader(ch.Snapshot)
-		de := labgob.NewDecoder(by)
-		if !(de.Decode(&kv.data) == nil && de.Decode(&kv.reqMp) == nil && de.Decode(&kv.config) == nil) {
-			panic("sync snapshot error")
-		}
+		kv.loadSnapshot(ch.Snapshot)
 		kv.lastIndex = ch.SnapshotIndex
 	}
 

@@ -18,7 +18,7 @@ const (
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrFailed      = "Failed to apply"
 	ErrIgnored     = "ErrIgnored"
-	ClientDebug    = false
+	ClientDebug    = true
 	ServerDebug    = true
 	TestDebug      = false
 
@@ -66,6 +66,12 @@ type Command struct {
 type ShardData struct {
 	ShardKey int
 	Shard    Shard
+}
+
+func (s ShardData) deepCopy() ShardData {
+	return ShardData{
+		ShardKey: s.ShardKey, Shard: s.Shard.deepCopy(),
+	}
 }
 
 type Op struct {

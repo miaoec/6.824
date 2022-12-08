@@ -1,6 +1,9 @@
 package shardkv
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+	"6.824/raft"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -152,6 +155,7 @@ func TestJoinLeave(t *testing.T) {
 }
 
 func TestSnapshot(t *testing.T) {
+	raft.IsDebug = true
 	fmt.Printf("Test: snapshots, join, and leave ...\n")
 
 	cfg := make_config(t, 3, false, 1000)
@@ -203,15 +207,16 @@ func TestSnapshot(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	cfg.checklogs()
-
+	fmt.Printf("start ShutdownAlll")
 	cfg.ShutdownGroup(0)
 	cfg.ShutdownGroup(1)
 	cfg.ShutdownGroup(2)
-
+	fmt.Printf("ShutdownAlll")
+	fmt.Printf("start RestartAlll")
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
-
+	fmt.Printf("RestartAlll")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
