@@ -22,15 +22,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/sasha-s/go-deadlock"
 	"log"
 	"math/rand"
 	"os"
 	"runtime"
 	"sort"
 	"strconv"
-	//"crypto/rand"
-	//	"bytes"
-	"sync"
+
 	"sync/atomic"
 	"time"
 
@@ -86,7 +85,7 @@ const (
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        deadlock.Mutex      // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -115,9 +114,10 @@ type Raft struct {
 	applyChan chan ApplyMsg
 
 	tracerName string
+	LogName    string
 }
 
-const IsDebug = false
+var IsDebug = false
 
 func (rf *Raft) GetStateSize() int {
 	rf.mu.Lock()
@@ -892,11 +892,17 @@ func (rf *Raft) logTrac(str string, args ...interface{}) {
 }
 
 func (rf *Raft) log(str string, args ...interface{}) {
+	if rf.LogName == "" {
+		rf.mu.Lock()
+		rf.LogName = strconv.Itoa(rf.me)
+		rf.mu.Unlock()
+	}
 	if IsDebug {
 		log.Printf(
 			"%s,%+v\n", fmt.Sprintf(
 				fmt.Sprintf(
-					"raft(id:%v,term:%v,state:%v,votefor:%v,lastIndex%v,commitIndex:%v,lastApplied%v)##: %v", rf.me,
+					"raft(id:%v,term:%v,state:%v,votefor:%v,lastIndex%v,commitIndex:%v,lastApplied%v)##: %v",
+					rf.LogName,
 					rf.term, rf.state,
 					rf.voteFor, rf.lastIncludeEntry.Index, rf.commitIndex, rf.lastApplied,
 					str,
@@ -940,7 +946,9 @@ func (rf *Raft) ticker() {
 				rf.electionTime.Reset(rf.newRandTimeOut())
 				rf.startElection(ctx)
 				rf.mu.Unlock()
+				continue
 			}
+			rf.mu.Unlock()
 		}
 	}
 }
